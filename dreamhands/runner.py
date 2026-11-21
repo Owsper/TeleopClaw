@@ -1,12 +1,18 @@
 """TeleopRunner: one call per 50 ms tick -> teleop -> IK -> sim -> Tick to listeners.
 
-The runner never talks to the Dream API (C owns that). Listeners get a Tick every step;
-images are attached only on steps where `record_images` asks for them (even steps by default)
-because rendering all three cameras costs ~120 ms, more than the 50 ms budget.
+The runner never talks to the Dream API (C owns that). Listeners get a Tick every step, in
+step order; images are attached only on steps where `record_images` asks for them (even
+steps by default). Rendering all three cameras costs ~100 ms, more than the 50 ms budget, so
+by default a background thread renders them (render_worker.py) and a tick that carries
+images reaches listeners up to MAX_LAG steps late. Ticks with keyboard events, and
+`flush()`, wait until everything before them is delivered, so listener state (C's recorder)
+is current whenever the caller looks at it.
 """
 from __future__ import annotations
 
+import sys
 import time
+from collections import deque
 from typing import Callable
 
 import mujoco
@@ -19,6 +25,7 @@ from .types import HandState, Tick, to14
 
 READY_TCP = np.array([-0.05, 0.05, 0.88])
 KEY_EVENTS = {"r": "record", "n": "next", "x": "discard"}
+MAX_LAG = 4  # steps a tick may wait for its images before the loop blocks on them
 OBJECTS = ("apple", "banana", "orange", "water_bottle", "bowl", "plate")
 
 
@@ -43,7 +50,8 @@ def camera_axes(sim: Sim, camera: str = "top") -> np.ndarray:
 
 class TeleopRunner:
     def __init__(self, sim: Sim | None = None, teleop: Teleop | None = None,
-                 record_images: bool = False, image_every: int = 2):
+                 record_images: bool = False, image_every: int = 2,
+                 async_images: bool | None = None):
         self.sim = sim or Sim()
         self.ik = ArmIK(self.sim.model)
         if teleop is None:
@@ -51,6 +59,13 @@ class TeleopRunner:
             teleop.cfg.axes = camera_axes(self.sim, "top")
         self.teleop = teleop
         self.record_images, self.image_every = record_images, image_every
+        # macOS: GLFW contexts must live on the main thread -> render in the loop there
+        self.async_images = sys.platform != "darwin" if async_images is None else async_images
+        self._worker = None
+        self._queue: deque[Tick] = deque()   # ticks not yet delivered, in step order
+        self._waiting: set[int] = set()      # steps whose images are still rendering
+        self._done: dict[int, dict] = {}     # finished renders not yet attached
+        self.last_images: dict | None = None  # newest delivered images (HUD)
         self.on_tick: list[Callable[[Tick], None]] = []
         self.left = HOME.copy()
         self.q = self.sim.state()["right"][:6].copy()  # commanded right joints
@@ -67,6 +82,49 @@ class TeleopRunner:
 
     def right_cmd(self) -> np.ndarray:
         return np.r_[self.q, self.grip]
+
+    # --- image delivery -------------------------------------------------------------
+    def _render_worker(self):
+        if self._worker is None and self.async_images and self.sim.can_render:
+            from .render_worker import RenderWorker
+            self._worker = RenderWorker(self.sim.model)
+            if not self._worker.ok:
+                self._worker, self.async_images = None, False
+        return self._worker
+
+    def _deliver(self, block: bool = False) -> None:
+        """Emit queued ticks in order; block = wait for every pending render."""
+        if self._worker is not None:
+            self._done.update(self._worker.poll())
+        while self._queue:
+            t = self._queue[0]
+            if t.step in self._waiting:
+                while t.step not in self._done:
+                    if not block and self.step_i - t.step < MAX_LAG:
+                        return
+                    step, imgs = self._worker.wait()
+                    self._done[step] = imgs
+                t.images = self._done.pop(t.step)
+                self._waiting.discard(t.step)
+            if t.images is not None:
+                self.last_images = t.images
+            self._queue.popleft()
+            for fn in self.on_tick:
+                fn(t)
+
+    def warm_images(self) -> None:
+        """Start the render threads now (~0.2 s) instead of on the first recorded tick."""
+        self._render_worker()
+
+    def flush(self) -> None:
+        """Deliver every tick produced so far (waits for in-flight renders)."""
+        self._deliver(block=True)
+
+    def close(self) -> None:
+        self.flush()
+        if self._worker is not None:
+            self._worker.close()
+            self._worker = None
 
     def near_dist(self) -> float | None:
         """Distance (m) from the right TCP to the closest scene object, None if none."""
@@ -119,16 +177,23 @@ class TeleopRunner:
             self.grip = grip
 
         state = self.sim.step(self.left, self.right_cmd())
-        images = None
+        images, pending = None, False
         if self.record_images and self.step_i % self.image_every == 0:
-            images = self.sim.images()
+            worker = self._render_worker()
+            if worker is not None:
+                worker.submit(self.step_i, self.sim.data)  # state right after this step
+                pending = True
+            else:
+                images = self.sim.images()
         flags["step_ms"] = round((time.perf_counter() - t0) * 1000, 1)
         tick = Tick(step=self.step_i, t=now,
                     state=to14(state["right"], state["left"]),
                     action=to14(self.right_cmd(), self.left),
                     images=images, hand=hand, mode=self.teleop.mode,
                     tcp=self.tcp(), flags=flags, events=events)
-        for fn in self.on_tick:
-            fn(tick)
+        if pending:
+            self._waiting.add(self.step_i)
+        self._queue.append(tick)
         self.step_i += 1
+        self._deliver(block=bool(events))
         return tick

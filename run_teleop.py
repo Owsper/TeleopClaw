@@ -82,6 +82,7 @@ def main() -> int:
         rec = Recorder(args.task, on_done=Saver(args.record),
                        referee=lambda: referee.verdict.success)
         runner.on_tick.append(rec.on_tick)
+        runner.warm_images()  # GL contexts up before the first r, no hitch mid-demo
     results: list[dict] = []
 
     def next_trial(verdict):
@@ -123,6 +124,7 @@ def main() -> int:
                 referee.reset()
             ended = "next" in tick.events or "discard" in tick.events
             if rec.ep is not None and referee(tick).done:  # lifted and held, timeout or dropped
+                runner.flush()  # the recorder must have every tick up to now
                 rec.stop()
                 ended = True
             if ended:  # fresh scene for the next episode
@@ -139,8 +141,8 @@ def main() -> int:
                 next_trial(v)
                 if len(results) >= args.trials:
                     break
-        if tick.images is not None:
-            frame = tick.images["top"]
+        if runner.record_images and runner.last_images is not None:
+            frame = runner.last_images["top"]  # newest 3-camera render, no extra cost
         elif tick.step % args.hud_every == 0:
             r = runner.sim.render(("top",))
             frame = r["top"] if r else None
@@ -152,6 +154,7 @@ def main() -> int:
             time.sleep(delay)
         else:
             nxt = time.perf_counter()  # fell behind: don't try to catch up
+    runner.close()  # delivers the last ticks, stops the render thread
     runner.sim.close()
     if hasattr(tracker, "close"):
         tracker.close()
