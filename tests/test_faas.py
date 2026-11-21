@@ -122,7 +122,7 @@ def test_happy_path(st,capsys):
 	assert "status : running | phase : training | step : 100/500 | loss : 0.5000 | ETA : ~20 min" in out
 	assert "step : 300/500 | loss : 0.5000 | ETA : ~10 min" in out
 	assert f'python -m dreamhands.evalrun --model {MODEL} --task "pick up the apple" --tag ft --episodes 10' in out
-	assert "this key belongs to me, expected Nems1337" in out
+	assert f"this key belongs to me, expected {faas.USER}" in out
 	assert "dreamcli example yam-mujoco" in out and f"/model {MODEL}" in out and "pool_warming" in out
 
 def test_emb_conflict_reuse(st):
