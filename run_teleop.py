@@ -5,6 +5,8 @@
 Keys: space = arm/disarm (arming goes to the ready pose), f = engage on/off,
 p = precision mode, t = take-over (rebase on measured joints), r/n/x = record/next/discard
 events for C, q or Esc = quit.
+
+    python run_teleop.py --mouse --trials 10   # 17:00 go/no-go, results -> trials.json
 """
 from __future__ import annotations
 
@@ -41,13 +43,28 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mouse", action="store_true", help="use the mouse instead of the webcam")
     ap.add_argument("--hud-every", type=int, default=3, help="render the top camera every N steps")
+    ap.add_argument("--trials", type=int, default=0,
+                    help="go/no-go: N apple pick trials judged by the referee (n = give up / next)")
     args = ap.parse_args()
     if not args.mouse:
         raise SystemExit("webcam tracker comes from A; use --mouse for now")
 
     from dreamhands.fake_tracker import MouseTracker
+    from dreamhands.trials import Referee
     runner = TeleopRunner()
     tracker = MouseTracker(WIN)
+    referee = Referee(runner.sim) if args.trials else None
+    results: list[dict] = []
+
+    def next_trial(verdict):
+        results.append({"trial": len(results) + 1, "success": verdict.success,
+                        "reason": verdict.reason or "skipped", "seconds": round(referee.t, 1)})
+        ok = sum(r["success"] for r in results)
+        print(f"trial {len(results)}/{args.trials}: {results[-1]['reason']}  -> {ok}/{len(results)}")
+        runner.sim.reset()
+        runner.engage = False
+        runner.go_ready()
+        referee.reset()
     frame = None
     nxt = time.perf_counter()
     while True:
@@ -73,6 +90,12 @@ def main() -> int:
         tick = runner.tick(tracker.read(), keys)
         if tick.events:
             print("events:", tick.events)
+        if referee is not None and runner.teleop.mode != DISARMED:
+            v = referee(tick)
+            if v.done or "next" in tick.events:
+                next_trial(v)
+                if len(results) >= args.trials:
+                    break
         if tick.step % args.hud_every == 0:
             r = runner.sim.render(("top",))
             frame = r["top"] if r else None
@@ -86,6 +109,12 @@ def main() -> int:
             nxt = time.perf_counter()  # fell behind: don't try to catch up
     runner.sim.close()
     cv2.destroyAllWindows()
+    if results:
+        import json
+        ok = sum(r["success"] for r in results)
+        with open("trials.json", "w") as fh:
+            json.dump({"success": ok, "trials": len(results), "results": results}, fh, indent=1)
+        print(f"GO/NO-GO: {ok}/{len(results)} ({'GO' if ok >= 5 else 'NO-GO'}), saved trials.json")
     return 0
 
 
