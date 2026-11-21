@@ -425,3 +425,7 @@ FodyWeavers.xsd
 # Official VS Code C# Dev Kit Extension exclusion
 #*.lscache
 trials.json
+person-c-todo.md
+HackLab #2 × Dream Labs — Deep Research & 48h Plan.pdf
+.venv/
+data/

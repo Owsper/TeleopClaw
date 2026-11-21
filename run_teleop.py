@@ -8,6 +8,11 @@ p = precision mode, t = take-over (rebase on measured joints), r/n/x = record/ne
 events for C, q or Esc = quit.
 
     python run_teleop.py --mouse --trials 10   # 17:00 go/no-go, results -> trials.json
+    python run_teleop.py --record data/dreamhands   # r = start an episode, n = end, x = discard
+
+Recording: the referee ends an episode by itself once the apple is lifted and held; the
+quality gate prints KEEP / DROP and only KEEP episodes are written (LeRobot v2.1). The scene
+resets after every episode with the apple at a new random spot (--fixed keeps the stock scene).
 """
 from __future__ import annotations
 
@@ -24,7 +29,7 @@ WIN = "DreamHands"
 DT = 0.05
 
 
-def draw_hud(img, tick, runner):
+def draw_hud(img, tick, runner, rec=None):
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if img is not None else np.zeros((360, 640, 3), np.uint8)
     f = tick.flags
     lines = [f"{tick.mode}  engage={'on' if runner.engage else 'off'}"
@@ -33,6 +38,11 @@ def draw_hud(img, tick, runner):
              f"step {f.get('step_ms', 0):.0f} ms  ik {f.get('ik_err_mm', '-')} mm"]
     for i, s in enumerate(lines):
         cv2.putText(img, s, (8, 20 + 20 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    if rec is not None:
+        last = rec.on_done.last
+        txt = f"REC {rec.ep.dur:.1f} s" if rec.ep else f"kept {rec.on_done.w.n}  {last or ''}"
+        cv2.putText(img, txt[:70], (8, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (0, 0, 255) if rec.ep else (0, 255, 0), 1)
     warn = [k for k in ("ik_reject", "workspace_edge", "tracking_lost") if f.get(k)]
     if warn:
         cv2.putText(img, " ".join(warn).upper(), (8, 345), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
@@ -47,6 +57,9 @@ def main() -> int:
     ap.add_argument("--trials", type=int, default=0,
                     help="go/no-go: N apple pick trials judged by the referee (n = give up / next)")
     ap.add_argument("--camera", type=int, default=0, help="webcam index for A's tracker")
+    ap.add_argument("--record", metavar="DIR", help="save KEEP episodes as a LeRobot dataset in DIR")
+    ap.add_argument("--task", default="pick up the apple", help="prompt stored with the episodes")
+    ap.add_argument("--fixed", action="store_true", help="recording: keep the stock apple position")
     args = ap.parse_args()
 
     from dreamhands.trials import Referee
@@ -58,7 +71,17 @@ def main() -> int:
     else:  # A's webcam + MediaPipe tracker (needs hand_landmarker.task, see README)
         from dreamhands.a_tracker import ATracker
         tracker = ATracker(args.camera)
-    referee = Referee(runner.sim) if args.trials else None
+    referee = Referee(runner.sim) if args.trials or args.record else None
+    rec = None
+    if args.record:
+        from dreamhands.recorder import Recorder
+        from dreamhands.save import Saver
+        from dreamhands.scene import scatter
+        if not args.fixed:
+            scatter(runner.sim)
+        rec = Recorder(args.task, on_done=Saver(args.record),
+                       referee=lambda: referee.verdict.success)
+        runner.on_tick.append(rec.on_tick)
     results: list[dict] = []
 
     def next_trial(verdict):
@@ -95,16 +118,33 @@ def main() -> int:
         tick = runner.tick(tracker.read(), keys)
         if tick.events:
             print("events:", tick.events)
-        if referee is not None and runner.teleop.mode != DISARMED:
+        if rec is not None:
+            if "record" in tick.events:
+                referee.reset()
+            ended = "next" in tick.events or "discard" in tick.events
+            if rec.ep is not None and referee(tick).done:  # lifted and held, timeout or dropped
+                rec.stop()
+                ended = True
+            if ended:  # fresh scene for the next episode
+                runner.sim.reset()
+                if not args.fixed:
+                    scatter(runner.sim)
+                runner.engage = False
+                runner.go_ready()
+                referee.reset()
+            runner.record_images = rec.ep is not None  # 3 cameras only while recording
+        if args.trials and runner.teleop.mode != DISARMED:
             v = referee(tick)
             if v.done or "next" in tick.events:
                 next_trial(v)
                 if len(results) >= args.trials:
                     break
-        if tick.step % args.hud_every == 0:
+        if tick.images is not None:
+            frame = tick.images["top"]
+        elif tick.step % args.hud_every == 0:
             r = runner.sim.render(("top",))
             frame = r["top"] if r else None
-        cv2.imshow(WIN, draw_hud(frame, tick, runner))
+        cv2.imshow(WIN, draw_hud(frame, tick, runner, rec))
 
         nxt += DT
         delay = nxt - time.perf_counter()
