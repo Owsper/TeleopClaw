@@ -2,3 +2,4 @@ dreamlabs==1.0.42
 opencv-python
 numpy
 pytest
+mediapipe
