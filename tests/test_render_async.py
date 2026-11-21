@@ -3,13 +3,17 @@ import time
 import numpy as np
 import pytest
 
-from dreamhands.runner import MAX_LAG, TeleopRunner
+from dreamhands.runner import MAX_LAG, TeleopRunner, default_async
 from dreamhands.sim import Sim
 from dreamhands.types import HandState
 
 
 def _hand():
     return HandState(t=time.monotonic(), present=True, confidence=1.0, pos=np.full(3, 0.5))
+
+
+pytestmark = pytest.mark.skipif(not default_async(),
+                                reason="background rendering is off on this platform")
 
 
 def _runner(async_images):

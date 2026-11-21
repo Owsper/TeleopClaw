@@ -10,6 +10,7 @@ is current whenever the caller looks at it.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from collections import deque
@@ -48,6 +49,19 @@ def camera_axes(sim: Sim, camera: str = "top") -> np.ndarray:
     return np.column_stack([flat(R[:, 0]), [0.0, 0.0, 1.0], flat(-R[:, 2])])
 
 
+def default_async() -> bool:
+    """Background rendering only where it is known to work: Windows (the recording laptop).
+
+    macOS: GLFW contexts must live on the main thread. Linux headless EGL: contexts on
+    worker threads abort the process in CI (SIGABRT, can't be caught). Override with
+    DREAMHANDS_ASYNC_RENDER=1 / 0.
+    """
+    env = os.environ.get("DREAMHANDS_ASYNC_RENDER")
+    if env is not None:
+        return env == "1"
+    return sys.platform == "win32"
+
+
 class TeleopRunner:
     def __init__(self, sim: Sim | None = None, teleop: Teleop | None = None,
                  record_images: bool = False, image_every: int = 2,
@@ -59,8 +73,7 @@ class TeleopRunner:
             teleop.cfg.axes = camera_axes(self.sim, "top")
         self.teleop = teleop
         self.record_images, self.image_every = record_images, image_every
-        # macOS: GLFW contexts must live on the main thread -> render in the loop there
-        self.async_images = sys.platform != "darwin" if async_images is None else async_images
+        self.async_images = default_async() if async_images is None else async_images
         self._worker = None
         self._queue: deque[Tick] = deque()   # ticks not yet delivered, in step order
         self._waiting: set[int] = set()      # steps whose images are still rendering
