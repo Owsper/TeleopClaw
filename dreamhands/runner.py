@@ -94,6 +94,8 @@ class TeleopRunner:
         events = [KEY_EVENTS[k] for k in keys if k in KEY_EVENTS]
         flags = {"ik_reject": False}
 
+        if hand.open_palm:  # A's stop gesture: drop engage, operator re-engages with f
+            self.engage = False
         engage = self.engage and not hand.fist  # fist = clutch (lift the mouse)
         target, grip = self.teleop.update(hand, engage, now)
         flags.update(self.teleop.flags)

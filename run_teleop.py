@@ -1,6 +1,7 @@
 """Drive the right YAM arm from the mouse (or A's tracker later) at 20 Hz.
 
-    python run_teleop.py --mouse
+    python run_teleop.py            # webcam via A's tracker (fist = clutch, pinch = grip)
+    python run_teleop.py --mouse    # mouse stand-in
 
 Keys: space = arm/disarm (arming goes to the ready pose), f = engage on/off,
 p = precision mode, t = take-over (rebase on measured joints), r/n/x = record/next/discard
@@ -45,14 +46,18 @@ def main() -> int:
     ap.add_argument("--hud-every", type=int, default=3, help="render the top camera every N steps")
     ap.add_argument("--trials", type=int, default=0,
                     help="go/no-go: N apple pick trials judged by the referee (n = give up / next)")
+    ap.add_argument("--camera", type=int, default=0, help="webcam index for A's tracker")
     args = ap.parse_args()
-    if not args.mouse:
-        raise SystemExit("webcam tracker comes from A; use --mouse for now")
 
-    from dreamhands.fake_tracker import MouseTracker
     from dreamhands.trials import Referee
     runner = TeleopRunner()
-    tracker = MouseTracker(WIN)
+    cv2.namedWindow(WIN)
+    if args.mouse:
+        from dreamhands.fake_tracker import MouseTracker
+        tracker = MouseTracker(WIN)
+    else:  # A's webcam + MediaPipe tracker (needs hand_landmarker.task, see README)
+        from dreamhands.a_tracker import ATracker
+        tracker = ATracker(args.camera)
     referee = Referee(runner.sim) if args.trials else None
     results: list[dict] = []
 
@@ -108,6 +113,8 @@ def main() -> int:
         else:
             nxt = time.perf_counter()  # fell behind: don't try to catch up
     runner.sim.close()
+    if hasattr(tracker, "close"):
+        tracker.close()
     cv2.destroyAllWindows()
     if results:
         import json

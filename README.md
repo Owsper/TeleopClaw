@@ -25,6 +25,7 @@ never printed, logged or committed. Nothing in the teleop loop calls the Dream A
 ## Drive the arm
 
 ```bash
+python run_teleop.py                       # webcam via A's tracker (download hand_landmarker.task first)
 python run_teleop.py --mouse               # mouse stands in for the hand tracker
 python run_teleop.py --mouse --trials 10   # apple go/no-go, results -> trials.json
 ```
@@ -117,6 +118,7 @@ Use `FakeTracker().latest()` for a mock HandState without a webcam.
 | `dreamhands/runner.py` | `TeleopRunner`: 20 Hz tick -> IK -> sim -> `Tick` to `on_tick` listeners, `go_ready()`, `take_over()` |
 | `dreamhands/trials.py` | apple referee + scripted pick baseline |
 | `dreamhands/fake_tracker.py` | mouse tracker with the same `HandState` output |
+| `dreamhands/a_tracker.py` | adapter from A's `common.types.HandState` (pixels, pinch 0 = closed, `stop`) to the control `HandState` |
 | `run_teleop.py` | the operator app with HUD |
 
 ## Conventions
