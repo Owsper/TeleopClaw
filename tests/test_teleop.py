@@ -44,7 +44,7 @@ def test_hand_right_and_up_move_tcp():
     assert tp.target[0] < READY_TCP[0] - 0.03  # right = -x world (default axes)
     tp2 = engaged()
     run(tp2, DT, 40, lambda i: (0.5, 0.4, 0.5))  # 0.1 down
-    assert tp2.target[2] < READY_TCP[2] - 0.03
+    assert tp2.target[2] < READY_TCP[2] - 0.02  # 0.1 * y-scale 0.3 = 3 cm, minus EMA lag
 
 
 def test_rate_limit():
@@ -109,6 +109,34 @@ def test_pinch_hysteresis():
         t += DT
         _, g = tp.update(hand(t, (0.5, 0.5, 0.5), pinch=p), True, t)
         assert g == want
+
+
+def _top_pixel(sim, p):
+    """Perspective image coords (right, up) of world point p in the top camera, unitless."""
+    m, d = sim.model, sim.data
+    c = m.camera("top").id
+    R, o = d.cam_xmat[c].reshape(3, 3), d.cam_xpos[c]
+    pc = R.T @ (p - o)  # camera frame: x right, y up, -z forward
+    return np.array([pc[0], pc[1]]) / -pc[2]
+
+
+def test_axes_match_top_camera():
+    from dreamhands.runner import camera_axes
+    from dreamhands.teleop import DEFAULT_AXES
+    sim = Sim(render=False)
+    assert np.allclose(camera_axes(sim), DEFAULT_AXES, atol=0.02)
+    for delta, check in [((0.1, 0, 0), lambda a, b: b[0] > a[0] + 0.01),   # right -> image right
+                         ((0, 0, 0.1), lambda a, b: b[1] > a[1] + 0.005)]:  # closer -> image up
+        runner = TeleopRunner(sim)
+        runner.go_ready()
+        runner.engage = True
+        t = 0.0
+        for i in range(30):
+            t += DT
+            runner.tick(hand(t, 0.5 + (np.array(delta) if i > 1 else 0)), now=t)
+        assert check(_top_pixel(sim, READY_TCP), _top_pixel(sim, runner.tcp()))
+    assert runner.tcp()[2] > 0.8  # pushing forward keeps height
+    sim.close()
 
 
 def test_runner_ready_and_follow():

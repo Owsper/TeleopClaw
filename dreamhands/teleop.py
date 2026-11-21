@@ -21,9 +21,10 @@ from .types import HandState
 
 DISARMED, READY, ENGAGED, HOLD = "DISARMED", "READY", "ENGAGED", "HOLD"
 
-# hand delta (x right, y up, z closer to camera) -> world delta. Tuned at 15:30 (axes step).
-# Default assumes the operator faces the same way the arm reaches (-y): right = -x world,
-# up = +z, pushing the hand toward the camera = forward = -y.
+# hand delta (x right, y up, z closer to camera) -> world delta; columns = world dirs.
+# Matches the `top` HUD camera (behind the arms, looking to -y): image-right = -x world,
+# up = +z, pushing the hand toward the webcam = forward = -y. The runner re-derives this
+# from the camera pose (runner.camera_axes), this is the fallback.
 DEFAULT_AXES = np.array([[-1.0, 0.0, 0.0],
                          [0.0, 0.0, -1.0],
                          [0.0, 1.0, 0.0]])
@@ -44,7 +45,10 @@ class Workspace:
 @dataclass
 class TeleopConfig:
     axes: np.ndarray = field(default_factory=lambda: DEFAULT_AXES.copy())
-    scale: np.ndarray = field(default_factory=lambda: np.array([0.5, 0.5, 0.3]))  # m per unit
+    # m of TCP per unit of normalized hand motion. x: a comfortable half-frame sweep (~0.5)
+    # covers half the 0.5 m workspace width; y: the workspace is only 0.10 m tall, so vertical
+    # is gentler for the grasp approach; z: depth from palm size is the noisiest axis.
+    scale: np.ndarray = field(default_factory=lambda: np.array([0.5, 0.3, 0.3]))
     ema: float = 0.35            # weight of the new sample (1 = no smoothing)
     deadband: float = 0.003      # m; smaller target changes are ignored (kills jitter)
     max_speed: float = 0.5       # m/s TCP rate limit

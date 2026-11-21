@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from typing import Callable
 
+import mujoco
 import numpy as np
 
 from .ik import TOP_DOWN, ArmIK
@@ -20,12 +21,34 @@ READY_TCP = np.array([-0.05, 0.05, 0.88])
 KEY_EVENTS = {"r": "record", "n": "next", "x": "discard"}
 
 
+def camera_axes(sim: Sim, camera: str = "top") -> np.ndarray:
+    """Hand->world axes so motion matches what the operator sees on the HUD camera.
+
+    hand x (right)  -> image-right of the camera, flattened onto the table plane
+    hand y (up)     -> world +z
+    hand z (closer) -> camera look direction flattened onto the table (push = forward)
+    Columns are world directions of hand x, y, z.
+    """
+    m, d = sim.model, sim.data
+    mujoco.mj_kinematics(m, d)
+    R = d.cam_xmat[m.camera(camera).id].reshape(3, 3)
+
+    def flat(v):
+        v = np.array([v[0], v[1], 0.0])
+        return v / np.linalg.norm(v)
+
+    return np.column_stack([flat(R[:, 0]), [0.0, 0.0, 1.0], flat(-R[:, 2])])
+
+
 class TeleopRunner:
     def __init__(self, sim: Sim | None = None, teleop: Teleop | None = None,
                  record_images: bool = False, image_every: int = 2):
         self.sim = sim or Sim()
         self.ik = ArmIK(self.sim.model)
-        self.teleop = teleop or Teleop(READY_TCP)
+        if teleop is None:
+            teleop = Teleop(READY_TCP)
+            teleop.cfg.axes = camera_axes(self.sim, "top")
+        self.teleop = teleop
         self.record_images, self.image_every = record_images, image_every
         self.on_tick: list[Callable[[Tick], None]] = []
         self.left = HOME.copy()
