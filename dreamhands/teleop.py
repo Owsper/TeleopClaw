@@ -57,6 +57,12 @@ class TeleopConfig:
     pinch_close: float = 0.6     # hysteresis on pinch -> gripper
     pinch_open: float = 0.4
     precision: float = 0.3       # scale multiplier in precision mode
+    # auto precision (only while the gripper is open: once it holds something, lift fast)
+    auto_precision: bool = True
+    near_on: float = 0.05        # m TCP-object distance: enter precision ..
+    near_off: float = 0.07       # .. leave it (hysteresis, no flicker at the boundary)
+    prepinch_on: float = 0.25    # fingers start closing (below pinch_close) -> precision
+    prepinch_off: float = 0.15
 
 
 class Teleop:
@@ -68,7 +74,10 @@ class Teleop:
         self.mode = DISARMED
         self.target = self.ready_tcp.copy()   # last commanded TCP
         self.grip = 1.0                       # 1 open, 0 closed
-        self.precision = False
+        self.precision = False                # manual toggle (key p)
+        self._near = False                    # auto triggers (hysteresis state)
+        self._prepinch = False
+        self._was_precise = False             # effective precision on the last tick
         self._hand0 = None                    # hand anchor (filtered)
         self._tcp0 = None                     # TCP anchor
         self._filt = None                     # EMA state of the hand
@@ -93,20 +102,39 @@ class Teleop:
             self.mode = HOLD  # re-anchors on the next fresh frame
 
     def set_precision(self, on: bool) -> None:
-        if on != self.precision:
-            self.precision = on
-            self._hand0 = None  # re-anchor so the scale change doesn't jump
+        self.precision = on  # update() re-anchors when the effective scale changes
+
+    @property
+    def precise(self) -> bool:
+        """Effective precision: manual toggle, or auto near an object / pre-pinch."""
+        auto = self.cfg.auto_precision and self.grip > 0.5 and (self._near or self._prepinch)
+        return self.precision or auto
+
+    def _auto_triggers(self, hand: HandState, near_dist: float | None) -> None:
+        c = self.cfg
+        if near_dist is None:
+            self._near = False
+        else:
+            self._near = near_dist < (c.near_off if self._near else c.near_on)
+        self._prepinch = hand.pinch >= (c.prepinch_off if self._prepinch else c.prepinch_on)
 
     # --- per tick -------------------------------------------------------------------
     def _fresh(self, hand: HandState, now: float) -> bool:
         return (hand.present and hand.confidence >= self.cfg.min_conf
                 and now - hand.t <= self.cfg.lost_timeout)
 
-    def update(self, hand: HandState, engage: bool, now: float, dt: float = 0.05):
-        """Returns (tcp_target, grip). engage = operator wants the arm to follow."""
+    def update(self, hand: HandState, engage: bool, now: float, dt: float = 0.05,
+               near_dist: float | None = None):
+        """Returns (tcp_target, grip). engage = operator wants the arm to follow.
+
+        near_dist: distance (m) from the TCP to the closest graspable object, if known.
+        """
         c = self.cfg
         fresh = self._fresh(hand, now)
-        self.flags = {"tracking_lost": not fresh, "workspace_edge": False}
+        if fresh:
+            self._auto_triggers(hand, near_dist)
+        self.flags = {"tracking_lost": not fresh, "workspace_edge": False,
+                      "precision": self.precise}
         if self.mode == DISARMED:
             return self.target, self.grip
 
@@ -131,11 +159,21 @@ class Teleop:
         if self.mode != ENGAGED:
             return self.target, self.grip
 
+        # gripper first: anchoring below must never delay a grasp by a tick
+        if hand.pinch >= c.pinch_close:
+            self.grip = 0.0
+        elif hand.pinch <= c.pinch_open:
+            self.grip = 1.0
+        if self.precise != self._was_precise:  # depends on grip (auto only while open)
+            self._was_precise = self.precise
+            self._hand0 = None  # re-anchor so the scale change doesn't jump
+        self.flags["precision"] = self.precise
+
         if self._hand0 is None:  # (re)anchor: zero motion on this tick
             self._hand0, self._tcp0 = self._filt.copy(), self.target.copy()
             return self.target, self.grip
 
-        k = c.precision if self.precision else 1.0
+        k = c.precision if self.precise else 1.0
         want = self._tcp0 + k * (c.axes @ (c.scale * (self._filt - self._hand0)))
         want, edge = self.ws.clamp(want)
         step = want - self.target
@@ -146,9 +184,4 @@ class Teleop:
                 step *= vmax / n
             self.target = self.target + step
         self.flags["workspace_edge"] = edge
-
-        if hand.pinch >= c.pinch_close:
-            self.grip = 0.0
-        elif hand.pinch <= c.pinch_open:
-            self.grip = 1.0
         return self.target, self.grip

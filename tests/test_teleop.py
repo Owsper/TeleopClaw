@@ -156,3 +156,60 @@ def test_runner_ready_and_follow():
     runner.take_over()
     assert np.allclose(runner.q, runner.sim.state()["right"][:6])
     runner.sim.close()
+
+
+def _travel(near=None, pinch=0.0, n=30):
+    """TCP travel (m) for a 0.2 hand sweep to the right, given auto-precision inputs."""
+    tp = engaged()
+    start = tp.target.copy()
+    t = DT
+    for i in range(n):
+        t += DT
+        x = 0.5 + 0.2 * min(1.0, (i + 1) / 10)
+        tp.update(hand(t, (x, 0.5, 0.5), pinch=pinch), True, t, near_dist=near)
+    return float(np.linalg.norm(tp.target - start)), tp
+
+
+def test_auto_precision_near_object():
+    far, tp = _travel(near=0.20)
+    near, tp2 = _travel(near=0.03)
+    assert not tp.flags["precision"] and tp2.flags["precision"]
+    assert near < 0.45 * far  # 0.3x scale (re-anchor on entry eats a tick)
+
+
+def test_auto_precision_prepinch_but_not_when_holding():
+    free, _ = _travel(pinch=0.0)
+    pre, tp = _travel(pinch=0.3)          # fingers closing, gripper still open
+    assert tp.flags["precision"] and pre < 0.45 * free
+    held, tp = _travel(pinch=0.9, near=0.0)  # gripper closed: lift at full speed
+    assert tp.grip == 0.0 and not tp.flags["precision"]
+    assert held > 0.8 * free
+
+
+def test_precision_hysteresis_and_no_jump():
+    tp = engaged()
+    t = DT
+    seen, prev = [], tp.target.copy()
+    for i, d in enumerate([0.08, 0.06, 0.049, 0.06, 0.069, 0.071, 0.06]):
+        t += DT
+        tgt, _ = tp.update(hand(t, (0.5 + 0.01 * i, 0.5, 0.5)), True, t, near_dist=d)
+        seen.append(tp.flags["precision"])
+        assert np.linalg.norm(tgt - prev) < 0.03  # toggling never jumps the TCP
+        prev = tgt.copy()
+    assert seen == [False, False, True, True, True, False, False]
+
+
+def test_manual_precision_toggle_reanchors():
+    tp = engaged()
+    t = run(tp, DT, 10, lambda i: (0.5 + 0.02 * i, 0.5, 0.5))
+    before = tp.target.copy()
+    tp.set_precision(True)
+    tgt, _ = tp.update(hand(t + DT, (0.7, 0.5, 0.5)), True, t + DT)
+    assert np.allclose(tgt, before) and tp.flags["precision"]
+
+
+def test_runner_reports_object_distance():
+    r = TeleopRunner(Sim(render=False))
+    assert "apple" in r.objects
+    d = r.near_dist()
+    assert d is not None and 0.0 < d < 1.0

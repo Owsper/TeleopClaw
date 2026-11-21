@@ -4,7 +4,7 @@
     python run_teleop.py --mouse    # mouse stand-in
 
 Keys: space = arm/disarm (arming goes to the ready pose), f = engage on/off,
-p = precision mode, t = take-over (rebase on measured joints), r/n/x = record/next/discard
+p = precision lock (auto: near an object or fingers starting to pinch), t = take-over (rebase on measured joints), r/n/x = record/next/discard
 events for C, q or Esc = quit.
 
     python run_teleop.py --mouse --trials 10   # 17:00 go/no-go, results -> trials.json
@@ -33,7 +33,7 @@ def draw_hud(img, tick, runner, rec=None):
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if img is not None else np.zeros((360, 640, 3), np.uint8)
     f = tick.flags
     lines = [f"{tick.mode}  engage={'on' if runner.engage else 'off'}"
-             f"{'  PRECISION' if runner.teleop.precision else ''}",
+             f"{'  PRECISION' if runner.teleop.precise else ''}",
              "tcp " + " ".join(f"{v:+.3f}" for v in tick.tcp) + f"  grip {runner.grip:.0f}",
              f"step {f.get('step_ms', 0):.0f} ms  ik {f.get('ik_err_mm', '-')} mm"]
     for i, s in enumerate(lines):
