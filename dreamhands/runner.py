@@ -19,6 +19,7 @@ from .types import HandState, Tick, to14
 
 READY_TCP = np.array([-0.05, 0.05, 0.88])
 KEY_EVENTS = {"r": "record", "n": "next", "x": "discard"}
+OBJECTS = ("apple", "banana", "orange", "water_bottle", "bowl", "plate")
 
 
 def camera_axes(sim: Sim, camera: str = "top") -> np.ndarray:
@@ -57,6 +58,8 @@ class TeleopRunner:
         self.step_i = 0
         self.engage = False
         self._ready_q = self.ik.solve_global(READY_TCP, TOP_DOWN).q
+        names = {self.sim.model.body(i).name for i in range(self.sim.model.nbody)}
+        self.objects = [o for o in OBJECTS if o in names]  # auto-precision targets
 
     # --- helpers ----------------------------------------------------------------------
     def tcp(self) -> np.ndarray:
@@ -64,6 +67,13 @@ class TeleopRunner:
 
     def right_cmd(self) -> np.ndarray:
         return np.r_[self.q, self.grip]
+
+    def near_dist(self) -> float | None:
+        """Distance (m) from the right TCP to the closest scene object, None if none."""
+        if not self.objects:
+            return None
+        tcp = self.tcp()
+        return min(float(np.linalg.norm(self.sim.data.body(o).xpos - tcp)) for o in self.objects)
 
     def go_ready(self, seconds: float = 2.0, hz: float = 20.0) -> float:
         """Interpolate joints to the top-down ready pose, arm the teleop, return pos_err (m)."""
@@ -97,7 +107,7 @@ class TeleopRunner:
         if hand.open_palm:  # A's stop gesture: drop engage, operator re-engages with f
             self.engage = False
         engage = self.engage and not hand.fist  # fist = clutch (lift the mouse)
-        target, grip = self.teleop.update(hand, engage, now)
+        target, grip = self.teleop.update(hand, engage, now, near_dist=self.near_dist())
         flags.update(self.teleop.flags)
         if self.teleop.mode != DISARMED:
             res, reject = self.ik.step(target, TOP_DOWN, self.q)
