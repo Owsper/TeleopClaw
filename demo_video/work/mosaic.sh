@@ -3,7 +3,7 @@
 set -e
 V=data/dreamhands/videos/chunk-000/observation.images.overhead
 W=demo_video/work/parts
-D=8
+D=14
 for r in $(seq 0 11); do
 	ins=""
 	fl=""

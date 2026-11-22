@@ -181,8 +181,8 @@ class Run:
 			if live:
 				self.feed(1)
 		self.steps += 1
-		# the team referee reads the right gripper : a pick with the left arm counts too
-		return self.ref(NS(action=np.r_[r[:6],min(r[6],l[6]),l]))
+		# "left" flag : the team referee then counts a pick with the left arm too
+		return self.ref(NS(action=np.r_[r,l],flags={"left"}))
 
 	def wait(self,sec,why):
 		if time.monotonic() - self.said > 20:

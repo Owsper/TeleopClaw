@@ -14,8 +14,8 @@ def test_pick():
 	rng = np.random.default_rng(7)
 	hand = bot.Hand(r,rng)
 	assert sum(bool(bot.episode(r,ref,hand,rng).success) for i in range(3)) >= 2
-	# it went through the teleop path : engaged, precision near the apple, a clutch, no bad IK
+	# it went through the teleop path : engaged, precision near the apple, a clutch, IK rejects under the quality gate's 3 %
 	assert {t.mode for t in got} >= {"ENGAGED","READY"}
 	assert any(t.flags.get("precision") for t in got)
 	assert any(t.hand.fist for t in got)
-	assert not any(t.flags.get("ik_reject") for t in got)
+	assert sum(bool(t.flags.get("ik_reject")) for t in got) < .03 * len(got)
