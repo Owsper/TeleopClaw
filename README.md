@@ -1,239 +1,249 @@
 # TeleopClaw (DreamHands)
 
-Webcam hand teleop for the official Dream Labs YAM MuJoCo sim: each hand drives its matching
-YAM arm, we record demonstrations, and the team fine-tunes Dream-1 on them. A take-over mode
-lets a human grab control back from the policy mid-episode.
+Webcam hand teleoperation for the two YAM arms in Dream Labs' MuJoCo simulator. Move your
+hands in 3D, pinch to close the claws, record demonstrations, fine-tune Dream-1 on them, and
+hand control back and forth between the policy and a human.
 
-HackLab #2 Berlin, Dream Labs simulation track.
+Built for the Dream Labs simulation track at HackLab #2 Berlin.
+
+[Watch the demo](demo_video/dreamhands_demo.mp4) · [Pitch deck](docs/TELEOP.pptx)
+
+## What it does
+
+- **Two-hand teleop** — each hand drives its matching YAM arm; use either hand alone or both.
+- **20 Hz control** — smoothed, rate-limited hand motion becomes joint targets through
+  damped-least-squares IK, with a workspace clamp and no-jump protection.
+- **Grasp feedback** — a top-view inset shows the claws and fruit, and the HUD reports when
+  both fingertips touch an object.
+- **Recording** — capture episodes, run a quality gate, and write a LeRobot v2.1 dataset from
+  three camera views.
+- **Fine-tuning** — a CLI drives the Dream Labs FaaS chain: validate, upload, process, fine-tune.
+- **Evaluation and take-over** — score a checkpoint headlessly, or let a human grab control
+  from Dream-1 mid-episode and hand it back.
+
+## How it works
+
+```text
+webcam ──> MediaPipe hands ──> gestures ──> HandState
+                                                │
+                                                ▼
+                          teleop mapping (clutch, smoothing, workspace)
+                                                │
+                                                ▼
+                                IK ──> MuJoCo YAM sim (20 Hz)
+                                                │
+                                                ▼
+                          Tick ──> recorder ──> quality gate
+                                                │
+                                                ▼
+                                   LeRobot dataset ──> Dream-1 fine-tune
+```
+
+The webcam tracker and the sim run on independent threads. The tracker publishes the newest
+hand state without blocking control, and the runner emits a `Tick` every 50 ms. Dataset
+cameras are only rendered while recording.
 
 ## Setup
 
-Python 3.11+ (tested on 3.13), Windows / macOS / Linux.
+Python 3.11–3.13 on Windows, macOS or Linux. A webcam is needed only for hand control. A Dream
+Labs API key is needed only for fine-tuning, evaluation and take-over.
 
 ```bash
 python -m venv .venv
 # Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-python -m dreamhands.sim      # smoke test: steps the sim, renders the top camera
-python -m pytest tests -q     # run after every change
 ```
 
-Headless Linux picks EGL automatically (`apt install libegl1 libgl1`); without any GL the sim
-still runs physics only. Dream API keys live in `~/.dreamlabs/credentials` per teammate and are
-never printed, logged or committed. Nothing in the teleop loop calls the Dream API.
-
-## Drive the arm
+`requirements.txt` brings in `dreamlabs==1.0.42` (the YAM sim), OpenCV, NumPy, MediaPipe,
+pytest and matplotlib. The LeRobot writer also imports `av` and `pyarrow`; install them if
+your environment does not already provide them:
 
 ```bash
-python run_teleop.py                       # direct 3D webcam control of both arms
-python run_teleop.py --gesture-planes      # optional V sign to switch AIM/HEIGHT
-python run_teleop.py --keyboard-axes       # optional W/S depth and J/K height
-python run_teleop.py --hand-3d             # previous all-hand mapping, with open-palm stop
-python run_teleop.py --mouse               # mouse stands in for the hand tracker
-python run_teleop.py --mouse --trials 10   # apple go/no-go, results -> trials.json
+pip install av pyarrow
 ```
 
-| Input | Action |
-| --- | --- |
-| Still open palm for 1 second | start one-hand control |
-| Move wrist left/right, up/down | move sideways, lower or lift |
-| Move toward / away from the webcam | move forward / back on the table |
-| Move hand across the webcam in AIM (with `--gesture-planes`) | move the white cross around the tabletop map |
-| Hold a V sign briefly, then relax (with `--gesture-planes`) | switch between AIM and HEIGHT |
-| Move hand down/up in HEIGHT (with `--gesture-planes`) | lower/lift with the table position locked |
-| Touch thumb and index finger | close the claw; keep pinching to hold |
-| `w` / `s` | with `--keyboard-axes`: move forward / back on the table, 5 mm per key event |
-| `j` / `k` | with `--keyboard-axes`: lower / lift, 5 mm per key event |
-| mouse move / wheel | hand x-y / depth |
-| left button (pinch) | close gripper |
-| right button (fist) | clutch: freeze, move the hand, let go, no jump |
-| `space` | arm (go to the top-down ready pose) / disarm |
-| `f` | ready the arm and start following, or toggle follow when already armed |
-| `g` | move the claw above the apple directly, then press `f` for manual follow |
-| `p` | precision mode (x0.3 motion), use it near the apple |
-| `t` | take-over: continue from the measured joints |
-| `r` / `n` / `x` | record / next / discard events for the recorder (in trials `n` = give up) |
-| `q` / `Esc` | quit |
+Smoke tests:
 
-In the default webcam mode, your left hand controls the left arm and your right hand
-controls the right arm. Use either hand alone or both together. Center each hand on
-its side of the preview and hold its open palm still for one second to start that arm.
-Keep it visible as the arm moves to its ready position. Each wrist has its own anchor
-and each pinch closes only its matching claw. If one hand goes out of view, its arm
-holds while the other continues. The webcam labels the hands LEFT and RIGHT, and
-the top view labels the claws L and R. Space disarms both when either is active.
-The optional mouse, keyboard-axis and alternate gesture modes drive the right arm.
-The wrist controls sideways motion and height. Move toward or away from the lens to
-adjust depth. All three directions are active together. Use the top-view cross to
-align with a fruit, lower your hand, then pinch. When the HUD reports contact on
-both jaws, keep pinching and raise your hand. Spread thumb and index to release.
-Depth is estimated from changes in apparent palm span relative to your starting pose.
+```bash
+python -m dreamhands.sim      # step the sim, render the top camera
+python -m pytest tests -q     # sim/render tests need dreamlabs + a GL context
+```
 
-With `--gesture-planes`, slide the white cross onto the fruit dot. Hold up your index and middle fingers
-in a V with ring and little fingers curled and thumb apart. Once HEIGHT appears, relax
-your fingers. Lower your hand, pinch, and raise your hand while keeping the pinch.
-Spread thumb and index to release. Use the V sign again to return to AIM.
+Headless Linux picks EGL automatically (`sudo apt install libegl1 libgl1`). Without any GL,
+the sim still runs physics only and images come back as `None`.
 
-With `--keyboard-axes`, press `F` with your hand centered. Tap `J` six times to come down
-3 cm from the starting height. Move sideways with your hand and line up the depth with
-`W` or `S`. Tap `J` until the fingers straddle the fruit, pinch, and keep pinching
-as you tap `K` to lift. The top-view inset shows the claw as a white cross and the
-three fruits as colored dots. Align the cross and dot before lowering. The HUD names
-the object when both fingertips touch it. A closed claw can also be empty.
-A stationary open hand keeps follow on in this mode. Sideways hand movement carries
-the fruit, and each `K` or `J` step holds the sideways target steady.
-
-If your hand reaches the edge of the webcam view during a grasp, press `F` while following
-to pause. The claw holds its position and grip while you move your hand back to the center.
-Pinch again before pressing `F` to resume with the claw closed, then raise your hand (use HEIGHT with `--gesture-planes` or `K` with `--keyboard-axes`).
-If the HUD already says `TRACKING_LOST`, keep pinching and bring your hand back into view.
-Following resumes automatically when the camera sees it again.
-
-The HUD shows the mode, TCP position, step time and warnings (`IK_REJECT`, `WORKSPACE_EDGE`,
-`TRACKING_LOST`).
-
-To try a forearm cue for moving above the apple, download the optional MediaPipe pose model
-once and start the webcam app with pose assist enabled.
+`hand_landmarker.task` is included in the repo. Pose assist is optional and needs one extra
+model:
 
 ```bash
 curl -fL -o pose_landmarker_lite.task https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
-python run_teleop.py --pose-assist
 ```
 
-Press `Space` to ready the arm, then `A` to request an approach. Keep your elbow, wrist, and
-hand visible. Hold your forearm level for half a second with your fingers relaxed. The webcam
-preview shows your forearm and hold progress. When the claw reaches the hover point, lower your hand, pinch to grab, then raise your hand (switch to HEIGHT with `--gesture-planes`, or use J/K with `--keyboard-axes`). Keep your hand visible during the move.
-If the cue is hard to detect, press `G` to move above the apple directly and `F` to follow your
-hand afterward. Press `F` or make a fist to cancel an approach.
-Keep pinching while you lift. If you need to pause with the claw closed, press `F`.
+Dream keys are read from `DREAM_API_KEY` or `~/.dreamlabs/credentials` and are never printed,
+logged or committed. The teleoperation loop itself makes no Dream API calls.
 
-## Hand tracker (A)
-
-Up to two hands, mirrored 640x480 webcam, MediaPipe 21 landmarks, normalized pinch, debounced fist/clutch and stationary open-palm stop. **Robot control is deliberately not implemented here.**
-
-### macOS quick start
+## Quick start
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-curl -L -o hand_landmarker.task 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task'
-python demo.py
+python demo.py          # check hand tracking on its own
+python run_teleop.py    # drive both arms
 ```
 
-Allow camera access if macOS asks. Other OS: activate the venv through your platform-specific command.
+By default both arms are active: your left hand controls the left arm, your right hand the
+right arm. Hold an open palm still for about one second to start that arm and keep it visible
+while the arm moves to its ready pose.
 
-For a different camera index: `python demo.py --camera 1`.
+- Move your wrist left/right and up/down.
+- Move toward or away from the camera for depth.
+- Pinch thumb and index to close that claw; keep pinching to hold, spread to release.
+- Make a fist to clutch: the arm pauses, you reposition your hand, and releasing resumes
+  without a jump.
+- If one hand leaves the view, only its arm holds; the other keeps following.
 
-### Control integration
+Depth comes from apparent palm size, so it is a single-camera estimate. Use the top-view cross
+to line up a grasp and press `P` for precision mode near an object. The HUD shows
+`IK_REJECT`, `WORKSPACE_EDGE` and `TRACKING_LOST` warnings.
 
-```python
-from hand_tracker import HandTracker
-tracker = HandTracker(camera_index=0).start()
-try:
-    while True:
-        hand = tracker.latest()  # returns HandState, never waits for the webcam
-        if not hand.valid:
-            # HOLD last robot command: tracking is absent or stale (>120ms)
-            pass
-        else:
-            # hand.px[0] = wrist, hand.px[9] = middle MCP
-            # hand.palm = wrist-to-middle-MCP pixel distance
-            # hand.pinch: 0 closed -> 1 open
-            # hand.fist: debounced clutch
-            # hand.stop: stationary open palm for >=1s
-            pass
-finally:
-    tracker.close()
-```
+Shared keys:
 
-Use `FakeTracker().latest()` for a mock HandState without a webcam.
-
-### What to test
-
-- Hand open: 21 green dots, skeleton; `valid=True`.
-- Thumb/index pinch: `pinch` approaches 0; separate them: approaches 1.
-- Fist 5 processed frames: `fist=True`; open 3 processed frames: `fist=False`.
-- Hold a **still** open palm ~1 second: `stop=True`; move or curl fingers: resets.
-- Hide hand: `valid=False` (the controller MUST HOLD on invalid state).
-- Compare `frame age` and `fps`; these are not hardware end-to-end latency measurements.
-
-### Architecture and caveats
-
-- Webcam capture and landmark inference have independent threads. The newest frame overwrites old ones, avoiding queue buildup.
-- `VIDEO` mode processes captured frames with monotonic millisecond timestamps. Display runs in the main thread for macOS OpenCV compatibility.
-- The camera mirrors frames before landmark detection. In two-hand mode the adapter reverses the bundled Tasks model’s handedness labels to recover anatomical left and right. Ambiguous or missing assignments hold the affected arm.
-- Pinch values are estimates, not calibrated force/gripper width. Tune `0.25 / 0.95` in `gestures.py` for the operator.
-- The all-fingers-curled fist rule sometimes fails when a fist is viewed edge-on; adjust gesture margin thresholds empirically.
-- Webcam depth uses the apparent 3D span from wrist to knuckles. Relative landmark depth helps compensate when you tilt your palm during a sideways slide. The result is still a single-camera estimate.
-- Camera and vision alone do NOT guarantee robot safety. The controller must HOLD on invalid/stale frames and enforce actuator limits.
-- `HandState.t` is monotonic capture time. The `latest()` method invalidates if sample age >0.12 sec.
-
-## Layout
-
-| Path | What |
+| Key | Action |
 | --- | --- |
-| `dreamhands/sim.py` | cross-platform wrapper around `dream_examples/yam_mujoco/yam_env.py` |
-| `dreamhands/types.py` | shared `HandState` (tracker -> control) and `Tick` (control -> recorder). Draft: tell the team before changing fields |
-| `dreamhands/ik.py` | damped-least-squares IK on `right_tcp`, gripper pointing down, free yaw |
-| `dreamhands/teleop.py` | state machine DISARMED / READY / ENGAGED / HOLD, clutch-relative mapping, EMA, deadband, rate limit, workspace clamp |
-| `dreamhands/runner.py` | `TeleopRunner`: 20 Hz tick -> IK -> sim -> `Tick` to `on_tick` listeners, `go_ready()`, `take_over()` |
-| `dreamhands/trials.py` | apple referee + scripted pick baseline |
-| `dreamhands/fake_tracker.py` | mouse tracker with the same `HandState` output |
-| `dreamhands/a_tracker.py` | adapter from A's `common.types.HandState` (pixels, pinch 0 = closed, `stop`) to the control `HandState` |
-| `run_teleop.py` | the operator app with HUD |
+| `Space` | ready the arm(s) / disarm |
+| `F` | start following, or pause/resume while armed |
+| `G` | move the right claw above the apple |
+| `P` | precision mode (0.3× motion) |
+| `T` | take over from measured joints (no jump) |
+| `R` / `N` / `X` | recorder: start / end and keep / discard |
+| `Q` / `Esc` | quit |
 
-## Conventions
+Input modes:
 
-- Robot vectors are 14-D, right arm first: `right[0:6], right_grip[6], left[7:13], left_grip[13]`;
-  gripper 1 = open, 0 = closed. Each sim step is 50 ms (20 Hz); the loop must stay within it.
-- `HandState.pos`: x 0..1 left to right on the mirrored preview, y 0..1 bottom to top, z larger =
-  closer to the camera. Hand motion maps to the view of the `top` camera: right = right, up = up,
-  toward the webcam = forward.
-- Workspace (m, world): x -0.35..0.15, y -0.10..0.15, z 0.78..0.88. Ready TCP (-0.05, 0.05, 0.88).
-- `Tick.images` (all three cameras, 360x640) only when recording, on even steps: rendering all
-  three takes ~120 ms, the top camera alone ~74 ms.
+| Command | What it does |
+| --- | --- |
+| `--mouse` | Mouse stand-in: move = x/y, wheel = depth, left button = pinch, right = fist |
+| `--hand-3d` | Previous all-hand mapping with the open-palm stop gesture |
+| `--gesture-planes` | V sign switches AIM (tabletop cross) ↔ HEIGHT (vertical motion) |
+| `--keyboard-axes` | Hand for sideways; `W`/`S` depth, `J`/`K` height, 5 mm per key |
+| `--pose-assist` | Press `A`, hold a level forearm 0.5 s, and approach the apple |
+| `--trials 10` | Apple go/no-go; `n` gives up, results go to `trials.json` |
+| `--record DIR` | Save KEEP episodes as a LeRobot dataset |
+| `--split` | Sim and webcam in two windows |
 
-## Apple go/no-go
+`--mouse`, `--hand-3d`, `--gesture-planes` and `--keyboard-axes` drive the right arm.
+`python run_teleop.py --mouse --trials 10` exercises the full control path without a webcam.
 
-Referee: success = apple lifted >= 4 cm and held for 1 s with the gripper closed; fail = timeout
-(60 s) or the apple drops off the table. A scripted pick through the same IK path succeeds 5/5 with
-a perfect aim, about 4/5 at 5 mm aim error and 3/5 at 10-20 mm: aim with precision mode.
-
-## Take-over (D)
-
-Dream-1 drives the arm; a fist held 0.5 s (or `h`) hands control to the human with no jump
-(the runner rebases on the measured joints), an open palm held still (or `g`) gives it back
-(`reset_episode()` + a refilled frame window). With `--record` every human segment >= 1.6 s
-is saved as its own episode: DAgger-style corrections exactly where the policy fails.
+## Recording demonstrations
 
 ```bash
-python -m dreamhands.takeover --mouse --dry-run                    # no network, scripted stand-in
-python -m dreamhands.takeover --model <checkpoint id>              # webcam, needs a Dream key
-python -m dreamhands.takeover --model <id> --record data/takeover  # keep the corrections
-python -m dreamhands.takeover --model ft                           # our fine-tuned Dream-1
+python run_teleop.py --record data/dreamhands
 ```
 
-## Fine-tuned model (C)
+`R` starts an episode, `N` ends and keeps it, `X` discards it. The apple referee can also end
+an episode automatically once the apple is lifted and held. A quality gate prints `KEEP` or
+`DROP` and only `KEEP` episodes are written. The scene resets with a random apple position
+unless `--fixed` is used.
 
-`dream-1-ft:0c2119f3-dreamhands`: Dream-1 fine-tuned for 500 steps on 141 simulated "pick up the
-apple" demos (99 scripted picks, 42 with a simulated hand driving the teleop code). `--model ft`
-is the short name in `takeover` and `evalrun`. It only runs with the API key of the account that
-trained it. It learned from demos that start at the teleop ready pose, so both tools start it
-there, and its 30 rows/s replies are resampled to the 20 Hz sim.
+Dataset details:
+
+- LeRobot v2.1 at 10 fps, from a 20 Hz control loop
+- Cameras: `top` → `observation.images.overhead`, `left` → `wrist_l`, `right` → `wrist_r`
+  (360×640 RGB)
+- 14-D state and action, right arm first:
+  `right_j1..j6, right_gripper, left_j1..j6, left_gripper` (1 = open, 0 = closed)
+- Quality gate: at least 1.6 s, tracking loss under 5 %, IK rejects under 3 %, no joint jump
+  above 0.25 rad
+
+`data/` is gitignored, so recordings stay local. Episodes can also be generated without a
+person:
 
 ```bash
-python -m dreamhands.evalrun --model ft --tag ft --episodes 10 --scatter --out data/eval.jsonl
+python -m dreamhands.scripted data/dreamhands -n 50   # scripted IK picks
+python -m dreamhands.bot data/dreamhands -n 40        # simulated hand through the real teleop code
+```
+
+`bot.py` uses the actual teleop mapping, but its hand is simulated, so these are not human
+demonstrations.
+
+## Fine-tuning Dream-1
+
+State lives in `data/faas.json`, so every step can be re-run:
+
+```bash
+python -m dreamhands.faas models                 # list models; also checks the key
+python -m dreamhands.faas check data/dreamhands  # local dataset check, no key needed
+python -m dreamhands.faas run data/dreamhands    # check → embodiment → upload → fine-tune
+python -m dreamhands.faas status --watch         # follow the current job
+python -m dreamhands.faas jobs                   # all fine-tune jobs
+```
+
+`run` defaults to 500 steps (500–10000 in hundreds), uploads under the `yam-sim` embodiment
+and polls until a fine-tuned model id is returned. `--no-wait` queues the job and exits.
+
+This repo's fine-tune is `dream-1-ft:0c2119f3-dreamhands`, exposed as `--model ft`. It only
+runs with the API key of the Dream account that trained it. Fine-tunes answer at about
+30 rows/s; the tools resample that to the 20 Hz sim. Stock models play one row per step.
+
+## Evaluation
+
+```bash
+python -m dreamhands.evalrun --model ft   --tag ft   --episodes 10 --scatter --out data/eval.jsonl
 python -m dreamhands.evalrun --model beta --tag base --episodes 10 --scatter --out data/eval.jsonl
 python -m dreamhands.report data/eval.jsonl --out data/report
 ```
 
-Sim eval, same 10 apple positions, 60 s limit: base Dream-1 0/10, fine-tuned 9/10.
+The default referee is the lift rule: success means the apple is raised at least 4 cm and held
+for 1 s with the gripper closed. It fails on a 60 s timeout or if the apple leaves the table.
+`--referee place` checks whether an object was released into the bowl or onto the plate.
+`--dry-run` uses a scripted stand-in policy with no network. The report writes `report.md`
+plus evaluation and quality charts; add `--quality data/dreamhands.quality.jsonl` to include
+the recording gate log.
+
+## Take-over
+
+```bash
+python -m dreamhands.takeover --mouse --dry-run               # no network
+python -m dreamhands.takeover --model ft                      # webcam, needs a Dream key
+python -m dreamhands.takeover --model ft --record data/takeover
+```
+
+Dream-1 drives the right arm. A fist held 0.5 s (or `H`) hands control to the human, starting
+from the measured joints so the arm does not jump. An open palm held still (or `G`) gives
+control back; the policy gets `reset_episode()` and a refilled frame window. With `--record`,
+each human segment that passes the quality gate (minimum 1.6 s) is saved as its own episode,
+giving DAgger-style corrections where the policy fails.
+
+## Project layout
+
+| Path | What it is |
+| --- | --- |
+| `run_teleop.py`, `demo.py` | Operator app and standalone tracker demo |
+| `camera.py`, `hand_tracker.py`, `gestures.py`, `common/types.py` | Webcam, MediaPipe tracking, gestures, tracker contract |
+| `dreamhands/sim.py`, `ik.py`, `teleop.py`, `runner.py` | Sim wrapper, IK, control mapping, 20 Hz runner |
+| `dreamhands/a_tracker.py`, `fake_tracker.py` | Webcam and mouse adapters for the control `HandState` |
+| `dreamhands/trials.py`, `referee.py`, `scene.py` | Lift and place referees, randomised starts |
+| `dreamhands/episode.py`, `recorder.py`, `quality.py`, `save.py`, `lerobot.py` | Episode buffering, recording, QC, dataset writer |
+| `dreamhands/scripted.py`, `bot.py` | Human-free demo generation |
+| `dreamhands/faas.py`, `evalrun.py`, `takeover.py`, `report.py` | Fine-tuning, evaluation, take-over, reports |
+| `dreamhands/pose_assist.py`, `ui.py`, `render_worker.py` | Forearm cue, demo window, background rendering |
+| `tests/`, `.github/workflows/sim.yml` | Test suite and 3-OS CI (sim smoke + pytest) |
+
+## Conventions and limits
+
+- Each sim step is 50 ms (20 Hz), and the control loop must stay inside that budget.
+- Workspace in metres: `x -0.35..0.15`, `y -0.10..0.15`, `z 0.78..0.88`. Ready TCP is
+  `(-0.05, 0.05, 0.88)`.
+- Hand coordinates: `x` 0..1 left to right on the mirrored preview, `y` 0..1 bottom to top,
+  `z` larger = closer to the camera. Motion matches the top camera: right = right, up = up,
+  toward the webcam = forward.
+- Camera and vision do not guarantee robot safety. The controller holds on stale frames
+  (older than 120 ms), clamps the workspace and rejects large joint jumps, but pinch is an
+  estimate, not calibrated gripper force or width.
+- Background rendering is enabled by default only on Windows; override with
+  `DREAMHANDS_ASYNC_RENDER=1` or `0`.
+- `--model ft` is tied to its training account; retrain with `python -m dreamhands.faas run`
+  to get a model your own key can run.
 
 ## Team
 
-- A: hand tracker (webcam -> `HandState`)
-- B: control + integration (sim, IK, teleop, runner)
-- C: recording, dataset and Dream-1 fine-tune (owns all Dream API calls)
-
-Work happens on `control` and is merged into `main` after each step.
+HackLab #2 Berlin, Dream Labs simulation track, built by a three-person team covering hand
+tracking, control/sim integration, and recording/fine-tuning.
