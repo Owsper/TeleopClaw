@@ -37,6 +37,22 @@ def loadDc():
 
 dc = loadDc()
 
+# our fine-tune of Dream-1 on the apple demos (python -m dreamhands.faas). only the key of the account that trained it can run it
+FT = "dream-1-ft:0c2119f3-dreamhands"
+
+
+def model(s):
+	return FT if s == "ft" else dc.resolve_model(s)
+
+
+def ours(m):
+	return str(m).startswith("dream-1-ft")
+
+
+def rate(m):
+	# a fine-tune answers at 30 rows per s, the stock models are played one row per sim step
+	return 30 if ours(m) else 20
+
 
 class Place:
 	# the geometric place detector (referee.py) behind the trials.Referee interface
@@ -306,7 +322,7 @@ def mine(a,path):
 
 def main(argv=None):
 	p = argparse.ArgumentParser(description="batch eval of one checkpoint in the sim")
-	p.add_argument("--model",type=dc.resolve_model,default=dc.BETA_MODEL,help="beta, or a checkpoint / fine-tune id")
+	p.add_argument("--model",type=model,default=dc.BETA_MODEL,help="beta, ft (our fine-tune), or a checkpoint / fine-tune id")
 	p.add_argument("--task",default="pick up the apple")
 	p.add_argument("--episodes",type=int,default=10)
 	p.add_argument("--seconds",type=float,default=60,help="sim time budget per episode")
@@ -315,12 +331,13 @@ def main(argv=None):
 	p.add_argument("--referee",choices=("lift","place"),default="lift",help="lift : team rule (trials.py), place : object in bowl / on plate")
 	p.add_argument("--hold",type=float,default=0.5,help="place : sim s the object must stay placed")
 	p.add_argument("--actions",type=int,default=48,help="rows executed per response, 1-48")
-	p.add_argument("--rate",type=float,default=20,help="action rows per s in a reply, resampled to the 20 Hz sim : 20 = one row per step (the stock example), 30 = real time for a fine-tune")
+	p.add_argument("--rate",type=float,help="action rows per s in a reply, resampled to the 20 Hz sim. default : 30 for a fine-tune (real time), else 20 = one row per step like the stock example")
 	p.add_argument("--home",action="store_true",help="start at the stock home pose, not the teleop ready pose")
 	p.add_argument("--scatter",action="store_true",help="randomised object start like the recordings (scene.py), seeded by episode")
 	p.add_argument("--warm-min",type=float,default=90,help="max minutes to wait for a starting model")
 	p.add_argument("--dry-run",action="store_true",help="no network : idle / scripted stand-in policy")
 	a = p.parse_args(argv)
+	a.rate = a.rate or rate(a.model)
 	if not 1 <= a.actions <= 48 or a.seconds <= 0 or not a.task.strip():
 		p.error("use 1-48 actions, positive seconds and a non-empty task")
 

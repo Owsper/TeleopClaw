@@ -92,8 +92,9 @@ class Takeover:
 
     def __init__(self, runner: TeleopRunner, pol, task="pick up the apple", model="",
                  poses=False, actions=48, rec=None, start=DREAM):
-        from .evalrun import dc
+        from .evalrun import dc, rate
         self.dc, self.r, self.pol = dc, runner, pol
+        self.rate = rate(model)  # rows per s in a reply: 30 for our fine-tune, 20 for the stock models
         self.env = runner.sim.env
         self.task, self.model, self.poses, self.actions = task, model, poses, actions
         self.rec = rec
@@ -185,10 +186,10 @@ class Takeover:
             self.status = f"{reason} : retrying"
             self.wait_until = time.monotonic() + (after or 2.0)
         elif rep is not None and self.mode == DREAM:
-            from .evalrun import chunks
+            from .evalrun import chunks, resample
             try:
                 left, right = self.dc.validate_chunk(self.env, chunks(rep), self.actions, verbose=False)
-                self.queue.extend(zip(left, right))
+                self.queue.extend(zip(resample(left, self.rate), resample(right, self.rate)))
                 self.status = f"dream : chunk of {len(left)}"
             except (ValueError, KeyError, TypeError) as e:
                 self.status = f"bad chunk : {type(e).__name__} : {e}"
@@ -230,9 +231,10 @@ def draw(img, to: Takeover, tick):
 def main(argv=None) -> int:
     import cv2
 
-    from .evalrun import dc
+    from .evalrun import dc, model, ours
     ap = argparse.ArgumentParser(description="Dream-1 drives, the human takes over and gives back")
-    ap.add_argument("--model", type=dc.resolve_model, default=dc.BETA_MODEL)
+    ap.add_argument("--model", type=model, default=dc.BETA_MODEL,
+                    help="beta, ft (our fine-tune, needs the key of the account that trained it) or a checkpoint id")
     ap.add_argument("--task", default="pick up the apple")
     ap.add_argument("--mouse", action="store_true", help="mouse instead of the webcam (right button = fist)")
     ap.add_argument("--camera", type=int, default=0)
@@ -246,6 +248,8 @@ def main(argv=None) -> int:
     runner = TeleopRunner()
     from .scene import scatter
     scatter(runner.sim)
+    if ours(a.model):  # our fine-tune learned from demos that start at the teleop ready pose
+        runner.go_ready()
     cv2.namedWindow(WIN)
     if a.mouse:
         from .fake_tracker import MouseTracker

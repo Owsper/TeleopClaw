@@ -211,7 +211,24 @@ is saved as its own episode: DAgger-style corrections exactly where the policy f
 python -m dreamhands.takeover --mouse --dry-run                    # no network, scripted stand-in
 python -m dreamhands.takeover --model <checkpoint id>              # webcam, needs a Dream key
 python -m dreamhands.takeover --model <id> --record data/takeover  # keep the corrections
+python -m dreamhands.takeover --model ft                           # our fine-tuned Dream-1
 ```
+
+## Fine-tuned model (C)
+
+`dream-1-ft:0c2119f3-dreamhands`: Dream-1 fine-tuned for 500 steps on 141 simulated "pick up the
+apple" demos (99 scripted picks, 42 with a simulated hand driving the teleop code). `--model ft`
+is the short name in `takeover` and `evalrun`. It only runs with the API key of the account that
+trained it. It learned from demos that start at the teleop ready pose, so both tools start it
+there, and its 30 rows/s replies are resampled to the 20 Hz sim.
+
+```bash
+python -m dreamhands.evalrun --model ft --tag ft --episodes 10 --scatter --out data/eval.jsonl
+python -m dreamhands.evalrun --model beta --tag base --episodes 10 --scatter --out data/eval.jsonl
+python -m dreamhands.report data/eval.jsonl --out data/report
+```
+
+Sim eval, same 10 apple positions, 60 s limit: base Dream-1 0/10, fine-tuned 9/10.
 
 ## Team
 
