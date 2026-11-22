@@ -245,5 +245,5 @@ giving DAgger-style corrections where the policy fails.
 
 ## Team
 
-HackLab #2 Berlin, Dream Labs simulation track, built by a three-person team covering hand
-tracking, control/sim integration, and recording/fine-tuning.
+HackLab #2 Berlin, Dream Labs simulation track, built by a four-person team covering hand
+tracking, control/sim integration, vision and recording/fine-tuning.
