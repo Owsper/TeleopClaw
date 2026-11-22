@@ -4,7 +4,7 @@
     python run_teleop.py --mouse    # mouse stand-in
 
 Keys: space = arm/disarm (arming goes to the ready pose), f = engage on/off,
-p = precision mode, t = take-over (rebase on measured joints), r/n/x = record/next/discard
+p = precision lock (auto: near an object or fingers starting to pinch), t = take-over (rebase on measured joints), r/n/x = record/next/discard
 events for C, q or Esc = quit.
 
     python run_teleop.py --mouse --trials 10   # 17:00 go/no-go, results -> trials.json
@@ -33,7 +33,7 @@ def draw_hud(img, tick, runner, rec=None):
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if img is not None else np.zeros((360, 640, 3), np.uint8)
     f = tick.flags
     lines = [f"{tick.mode}  engage={'on' if runner.engage else 'off'}"
-             f"{'  PRECISION' if runner.teleop.precision else ''}",
+             f"{'  PRECISION' if runner.teleop.precise else ''}",
              "tcp " + " ".join(f"{v:+.3f}" for v in tick.tcp) + f"  grip {runner.grip:.0f}",
              f"step {f.get('step_ms', 0):.0f} ms  ik {f.get('ik_err_mm', '-')} mm"]
     for i, s in enumerate(lines):
@@ -82,6 +82,7 @@ def main() -> int:
         rec = Recorder(args.task, on_done=Saver(args.record),
                        referee=lambda: referee.verdict.success)
         runner.on_tick.append(rec.on_tick)
+        runner.warm_images()  # GL contexts up before the first r, no hitch mid-demo
     results: list[dict] = []
 
     def next_trial(verdict):
@@ -123,6 +124,7 @@ def main() -> int:
                 referee.reset()
             ended = "next" in tick.events or "discard" in tick.events
             if rec.ep is not None and referee(tick).done:  # lifted and held, timeout or dropped
+                runner.flush()  # the recorder must have every tick up to now
                 rec.stop()
                 ended = True
             if ended:  # fresh scene for the next episode
@@ -139,8 +141,8 @@ def main() -> int:
                 next_trial(v)
                 if len(results) >= args.trials:
                     break
-        if tick.images is not None:
-            frame = tick.images["top"]
+        if runner.record_images and runner.last_images is not None:
+            frame = runner.last_images["top"]  # newest 3-camera render, no extra cost
         elif tick.step % args.hud_every == 0:
             r = runner.sim.render(("top",))
             frame = r["top"] if r else None
@@ -152,6 +154,7 @@ def main() -> int:
             time.sleep(delay)
         else:
             nxt = time.perf_counter()  # fell behind: don't try to catch up
+    runner.close()  # delivers the last ticks, stops the render thread
     runner.sim.close()
     if hasattr(tracker, "close"):
         tracker.close()
