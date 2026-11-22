@@ -25,6 +25,7 @@ class HandState:
     fist: bool = False                   # clutch gesture
     open_palm: bool = False              # optional stop gesture
     handedness: str = "right"            # "right" | "left"
+    v_sign: bool = False                 # index and middle extended, ring and pinky curled
 
 
 @dataclass
@@ -40,6 +41,7 @@ class Tick:
     tcp: np.ndarray = field(default_factory=lambda: np.zeros(3))  # right TCP world pos (m)
     flags: dict = field(default_factory=dict)  # ik_reject, workspace_edge, tracking_lost, ...
     events: list = field(default_factory=list)  # keyboard events: "record", "next", "discard"
+    left_hand: HandState | None = None  # same-frame left input in bimanual webcam mode
 
 
 def to14(right: np.ndarray, left: np.ndarray) -> np.ndarray:

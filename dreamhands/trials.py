@@ -48,7 +48,7 @@ class Referee:
         self.t += self.dt
         z = float(self.sim.data.body(self.body).xpos[2])
         v.lift = z - self.z0
-        closed = tick.action[6] < 0.5
+        closed = tick.action[6] < 0.5 or ("left" in tick.flags and tick.action[13] < 0.5)
         self.held = self.held + self.dt if (v.lift >= LIFT_M and closed) else 0.0
         if self.held >= HOLD_S:
             v.done, v.success, v.reason = True, True, f"lifted {v.lift * 100:.1f} cm"

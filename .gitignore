@@ -10,6 +10,8 @@
 *.userosscache
 *.sln.docstates
 *.env
+.env.*
+!.env.example
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
@@ -429,4 +431,6 @@ person-c-todo.md
 DreamHands_build_pipeline.md
 HackLab #2 × Dream Labs — Deep Research & 48h Plan.pdf
 .venv/
+.venv312/
+pose_landmarker_lite.task
 data/
