@@ -426,6 +426,7 @@ FodyWeavers.xsd
 #*.lscache
 trials.json
 person-c-todo.md
+DreamHands_build_pipeline.md
 HackLab #2 × Dream Labs — Deep Research & 48h Plan.pdf
 .venv/
 data/

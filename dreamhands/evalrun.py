@@ -120,13 +120,29 @@ class Fake:
 
 def chunks(rep):
 	# a fine-tune may answer only per_key action.<part> rows : build the YAM chunks from them
-	if "q_r_chunk" in rep or not isinstance(rep.get("per_key"),dict):
-		return rep
-	pk,rep = rep["per_key"],dict(rep)
-	for side,key in (("right","q_r_chunk"),("left","q_l_chunk")):
-		arm = np.asarray(pk[f"action.{side}_arm"],float).reshape(-1,6)
-		rep[key] = np.hstack([arm,np.asarray(pk[f"action.{side}_gripper"],float).reshape(-1,1)])
+	rep = dict(rep)
+	if "q_r_chunk" not in rep and isinstance(rep.get("per_key"),dict):
+		pk = rep["per_key"]
+		for side,key in (("right","q_r_chunk"),("left","q_l_chunk")):
+			arm = np.asarray(pk[f"action.{side}_arm"],float).reshape(-1,6)
+			rep[key] = np.hstack([arm,np.asarray(pk[f"action.{side}_gripper"],float).reshape(-1,1)])
+	# a fine-tune overshoots the gripper a little (1.05 for open), the sim check wants 0..1
+	for key in ("q_r_chunk","q_l_chunk"):
+		q = np.array(rep.get(key,[]),float)
+		if q.ndim == 2 and q.shape[1] == 7:
+			g = q[:,6]
+			q[:,6] = np.where(np.abs(g - .5) < .75,np.clip(g,0,1),g)
+			rep[key] = q
 	return rep
+
+
+def resample(x,rate):
+	# rows at `rate` per s -> one row per 50 ms sim step
+	x = np.asarray(x,float)
+	t = np.arange(max(1,int(len(x) * 20 / rate))) * rate / 20
+	i = np.minimum(t.astype(int),len(x) - 1)
+	j = np.minimum(i + 1,len(x) - 1)
+	return x[i] + (x[j] - x[i]) * (t - i)[:,None]
 
 
 class Run:
@@ -137,6 +153,7 @@ class Run:
 		self.obj = parse(a.task)[0]
 		self.ref = trials.Referee(self.sim,self.obj,DT) if a.referee == "lift" else Place(self.sim,a.task,a.hold)
 		self.poses = a.model in dc.POSE_MODELS
+		self.ready = ArmIK(self.sim.model).solve_global(READY_TCP,TOP_DOWN).q
 		self.pol = None
 		self.fatal = False
 		self.cam = True
@@ -164,7 +181,8 @@ class Run:
 			if live:
 				self.feed(1)
 		self.steps += 1
-		return self.ref(NS(action=np.r_[r,l]))
+		# the team referee reads the right gripper : a pick with the left arm counts too
+		return self.ref(NS(action=np.r_[r[:6],min(r[6],l[6]),l]))
 
 	def wait(self,sec,why):
 		if time.monotonic() - self.said > 20:
@@ -207,6 +225,10 @@ class Run:
 		if a.scatter:
 			scatter(sim,ep,self.obj)  # seeded by ep, so every checkpoint sees the same starts
 			sim.step(S.HOME,S.HOME)
+		# the recordings start at the teleop ready pose (run_teleop arms there), so the eval does too
+		q0 = sim.state()["right"][:6]
+		for i in range(1,0 if a.home else 51):
+			env.step(S.HOME,np.r_[q0 + (self.ready - q0) * (.5 - .5 * np.cos(np.pi * min(i,40) / 40)),1.0])
 		self.ref.reset()
 		self.win = {n: deque(maxlen=dc.FRAMES) for n in dc.VIDEO_ROLES}
 		self.steps = 0
@@ -230,7 +252,7 @@ class Run:
 				except (ValueError,KeyError,TypeError) as e:
 					err = f"bad chunk : {type(e).__name__} : {e}"
 					break
-				for l,r in zip(left,right):
+				for l,r in zip(resample(left,a.rate),resample(right,a.rate)):
 					v = self.step(l,r,True)
 					if v.done or self.steps >= nmax:
 						break
@@ -293,6 +315,8 @@ def main(argv=None):
 	p.add_argument("--referee",choices=("lift","place"),default="lift",help="lift : team rule (trials.py), place : object in bowl / on plate")
 	p.add_argument("--hold",type=float,default=0.5,help="place : sim s the object must stay placed")
 	p.add_argument("--actions",type=int,default=48,help="rows executed per response, 1-48")
+	p.add_argument("--rate",type=float,default=20,help="action rows per s in a reply, resampled to the 20 Hz sim : 20 = one row per step (the stock example), 30 = real time for a fine-tune")
+	p.add_argument("--home",action="store_true",help="start at the stock home pose, not the teleop ready pose")
 	p.add_argument("--scatter",action="store_true",help="randomised object start like the recordings (scene.py), seeded by episode")
 	p.add_argument("--warm-min",type=float,default=90,help="max minutes to wait for a starting model")
 	p.add_argument("--dry-run",action="store_true",help="no network : idle / scripted stand-in policy")

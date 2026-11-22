@@ -135,13 +135,71 @@ class Writer:
 		return i
 
 
+def merge(src,dst):
+	"""append every episode of the dataset src (another laptop's recordings) to dst"""
+	src = Path(src)
+	si = json.loads((src / "meta" / "info.json").read_text())
+	w = Writer(dst)
+	if w.info is None:
+		w.info = {k: v for k,v in si.items()}
+	assert si["fps"] == w.fps,f"fps : {si['fps']} vs {w.fps}"
+	assert si["features"] == w.info["features"],"features differ (camera size or keys)"
+	tasks = {t["task_index"]: t["task"] for t in rdl(src / "meta" / "tasks.jsonl")}
+	stats = {s["episode_index"]: s["stats"] for s in rdl(src / "meta" / "episodes_stats.jsonl")}
+	vkeys = [k for k,f in si["features"].items() if f["dtype"] == "video"]
+	for e in rdl(src / "meta" / "episodes.jsonl"):
+		j,i,n = e["episode_index"],w.n,e["length"]
+		sck,ck = j // si["chunks_size"],i // CHUNK
+		tbl = pq.read_table(src / si["data_path"].format(episode_chunk = sck,episode_index = j))
+		ti,new = {},[]
+		for t in sorted(set(tbl["task_index"].to_pylist())):
+			s = tasks[t]
+			if s not in w.tasks and s not in new:
+				new.append(s)
+			ti[t] = w.tasks.index(s) if s in w.tasks else len(w.tasks) + new.index(s)
+		fi = np.asarray(tbl["frame_index"].to_pylist(),np.int64)
+		cols = {"episode_index": np.full(n,i,np.int64),"index": w.frames + fi,
+			"task_index": np.asarray([ti[t] for t in tbl["task_index"].to_pylist()],np.int64)}
+		for k,v in cols.items():
+			tbl = tbl.set_column(tbl.schema.get_field_index(k),k,pa.array(v))
+		st = dict(stats[j])
+		st.update({k: stat(v,(1,),n) for k,v in cols.items()})
+		pp = w.root / DATA.format(episode_chunk = ck,episode_index = i)
+		pp.parent.mkdir(parents = True,exist_ok = True)
+		pq.write_table(tbl,tmp(pp))
+		vps = []
+		for k in vkeys:
+			vp = w.root / VIDEO.format(episode_chunk = ck,video_key = k,episode_index = i)
+			vp.parent.mkdir(parents = True,exist_ok = True)
+			tmp(vp).write_bytes((src / si["video_path"].format(episode_chunk = sck,video_key = k,episode_index = j)).read_bytes())
+			vps.append(vp)
+		for p in (pp,*vps):
+			os.replace(tmp(p),p)
+		apl(w.meta / "episodes_stats.jsonl",{"episode_index": i,"stats": st})
+		for s in new:
+			apl(w.meta / "tasks.jsonl",{"task_index": len(w.tasks),"task": s})
+			w.tasks.append(s)
+		apl(w.meta / "episodes.jsonl",{"episode_index": i,"tasks": e["tasks"],"length": n})
+		w.n += 1
+		w.frames += n
+		w.save()
+	return w.n
+
+
 def validate(root):
 	from dream import datasets
 	return datasets.validate_dataset(root,YAM_EMBODIMENT)
 
 
 if __name__ == "__main__":
-	rep = validate(sys.argv[1])
+	import argparse
+	ap = argparse.ArgumentParser(description = "check a dataset, --add appends other datasets to it first")
+	ap.add_argument("root")
+	ap.add_argument("--add",nargs = "+",default = [],metavar = "SRC")
+	a = ap.parse_args()
+	for s in a.add:
+		print(f"merged {s} : {merge(s,a.root)} episodes now")
+	rep = validate(a.root)
 	for k in ("ok","error","episodes","frames","fps","video_keys","notes"):
 		print(f"{k} : {getattr(rep,k)}")
 	sys.exit(0 if rep.ok else 1)

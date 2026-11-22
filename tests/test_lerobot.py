@@ -76,6 +76,26 @@ def test_append_resume(tmp_path):
 	assert pq.read_table(root / "data/chunk-000/episode_000002.parquet")["index"].to_pylist() == list(range(80,130))
 
 
+def test_merge(tmp_path):
+	a,b = tmp_path / "a",tmp_path / "b"
+	Writer(a).add(mkEp())
+	w = Writer(b)
+	w.add(mkEp(30,"put the cube in the bin"))
+	w.add(mkEp(40))
+	assert lerobot.merge(b,a) == 3
+	rep = validate(a)
+	assert rep.ok,rep.error
+	assert (rep.episodes,rep.frames,rep.notes) == (3,120,[])
+	tbl = pq.read_table(a / "data/chunk-000/episode_000002.parquet")
+	assert tbl["index"].to_pylist() == list(range(80,120))
+	assert set(tbl["episode_index"].to_pylist()) == {2}
+	# b's task 1 is a's task 0, b's task 0 is new here
+	assert set(tbl["task_index"].to_pylist()) == {0}
+	assert [json.loads(l)["task"] for l in (a / "meta/tasks.jsonl").read_text().splitlines()] == ["pick up the cube","put the cube in the bin"]
+	assert lerobot.merge(b,tmp_path / "c") == 2
+	assert validate(tmp_path / "c").ok
+
+
 def test_crash(tmp_path,monkeypatch):
 	root = tmp_path / "sess"
 	w = Writer(root)
