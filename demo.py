@@ -16,7 +16,7 @@ CONNECTIONS = (
 )
 
 
-def draw(frame, state, fps):
+def draw(frame, state, fps, keyboard_axes=False, gesture_planes=False, direct_hand=False):
     if state.valid:
         pts = [(int(x), int(y)) for x, y in state.px]
         for i, j in CONNECTIONS:
@@ -29,9 +29,12 @@ def draw(frame, state, fps):
     info = [
         f"TRACKING: {'YES' if state.valid else 'NO'}   FPS: {fps:.1f}",
         f"PINCH (0 closed, 1 open): {state.pinch:.2f}",
-        f"FIST/CLUTCH: {state.fist}   STOP: {state.stop}",
+        f"FIST: {state.fist}" + ("" if keyboard_axes or gesture_planes or direct_hand else f"   STOP: {state.stop}"),
         f"PALM: {state.palm:.0f}px   FRAME AGE: {max(0, (time.monotonic()-state.t)*1000):.0f}ms",
-        "Make a fist / pinch / hold open palm still 1s. Q = quit.",
+        ("Move wrist in 3D. Pinch to hold; raise to lift." if direct_hand else
+         "Open palm starts. V changes mode. Pinch to grab." if gesture_planes else
+         "Hand left/right. W/S depth. J/K lower/lift. Pinch to grab." if keyboard_axes else
+         "Make a fist / pinch / hold open palm still 1s. Q = quit."),
     ]
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (frame.shape[1], 125), (15, 15, 15), -1)

@@ -213,3 +213,55 @@ def test_runner_reports_object_distance():
     assert "apple" in r.objects
     d = r.near_dist()
     assert d is not None and 0.0 < d < 1.0
+
+
+def test_clutch_released_after_fast_reposition_has_no_drift():
+    tp = engaged()
+    parked = tp.target.copy()
+    tp.update(hand(0.10, (0.8, 0.5, 0.5)), False, 0.10)
+    run(tp, 0.10, 12, lambda i: (0.8, 0.5, 0.5))
+    np.testing.assert_allclose(tp.target, parked)
+
+
+def test_fast_sweep_can_reverse_at_reach_limit():
+    r = TeleopRunner(Sim(render=False))
+    try:
+        r.go_ready()
+        r.engage = True
+        rejected = False
+        for i, x in enumerate([0.5] + [0.1] * 25 + [0.14] * 12):
+            t = i * DT
+            before = r.q.copy()
+            tick = r.tick(hand(t, (x, 0.5, 0.5)), now=t)
+            assert np.max(np.abs(r.q - before)) <= r.ik.max_jump
+            rejected |= tick.flags["ik_reject"]
+            if i == 25:
+                edge = tick.tcp.copy()
+                assert rejected
+                assert np.linalg.norm(edge - r.teleop.target) < 0.006
+        assert tick.tcp[0] < edge[0] - 0.01
+    finally:
+        r.sim.close()
+
+
+def test_reverse_after_hand_travels_past_workspace_floor():
+    tp = engaged()
+    t = run(tp, DT, 30, lambda i: (0.5, 0.0, 0.5))
+    assert np.isclose(tp.target[2], tp.ws.lo[2], atol=tp.cfg.deadband)
+    run(tp, t, 6, lambda i: (0.5, 0.05, 0.5))
+    assert tp.target[2] > tp.ws.lo[2] + 0.01
+
+
+def test_f_during_tracking_loss_keeps_follow_requested():
+    r = TeleopRunner(Sim(render=False))
+    try:
+        r.go_ready()
+        p = (0.5, 0.5, 0.5)
+        first = r.tick(hand(0, p), keys="f", now=0)
+        lost = r.tick(hand(DT, p, present=False), keys="f", now=DT)
+        assert r.engage and lost.mode == HOLD
+        resumed = r.tick(hand(2 * DT, (0.8, 0.2, 0.5)), now=2 * DT)
+        assert resumed.mode == ENGAGED
+        np.testing.assert_array_equal(first.action, resumed.action)
+    finally:
+        r.sim.close()

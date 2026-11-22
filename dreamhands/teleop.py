@@ -49,6 +49,9 @@ class TeleopConfig:
     # covers half the 0.5 m workspace width; y: the workspace is only 0.10 m tall, so vertical
     # is gentler for the grasp approach; z: depth from palm size is the noisiest axis.
     scale: np.ndarray = field(default_factory=lambda: np.array([0.5, 0.3, 0.3]))
+    direct_hand: bool = False  # wrist x/y and calibrated apparent palm size
+    gesture_planes: bool = False  # V switches between tabletop aim and vertical motion
+    keyboard_axes: bool = False  # webcam controls x and grip, keys control depth and height
     ema: float = 0.35            # weight of the new sample (1 = no smoothing)
     deadband: float = 0.003      # m; smaller target changes are ignored (kills jitter)
     max_speed: float = 0.5       # m/s TCP rate limit
@@ -65,6 +68,11 @@ class TeleopConfig:
     prepinch_off: float = 0.15
 
 
+    @property
+    def fruit_feedback(self) -> bool:
+        return self.direct_hand or self.gesture_planes or self.keyboard_axes
+
+
 class Teleop:
     def __init__(self, ready_tcp, workspace: Workspace | None = None,
                  cfg: TeleopConfig | None = None):
@@ -78,14 +86,21 @@ class Teleop:
         self._near = False                    # auto triggers (hysteresis state)
         self._prepinch = False
         self._was_precise = False             # effective precision on the last tick
+        self._distance_ratio = 1.0
         self._hand0 = None                    # hand anchor (filtered)
         self._tcp0 = None                     # TCP anchor
         self._filt = None                     # EMA state of the hand
+        self.height_mode = False
+        self._v_since = None
+        self._v_switched = False
         self.flags: dict = {}
 
     # --- mode control -------------------------------------------------------------
     def arm(self, tcp=None) -> None:
         self.mode = READY
+        self.height_mode = False
+        self._v_since = None
+        self._v_switched = False
         self.target = np.asarray(self.ready_tcp if tcp is None else tcp, float).copy()
         self.grip = 1.0
         self._hand0 = None
@@ -100,6 +115,13 @@ class Teleop:
         self._hand0 = None
         if self.mode == ENGAGED:
             self.mode = HOLD  # re-anchors on the next fresh frame
+
+    def reject_motion(self, previous_target: np.ndarray) -> None:
+        """At a reach limit, let the next hand movement start at the accepted pose."""
+        self.target = previous_target
+        self._tcp0 = previous_target.copy()
+        self._hand0 = self._filt.copy()
+        self._distance_ratio = 1.0
 
     def set_precision(self, on: bool) -> None:
         self.precision = on  # update() re-anchors when the effective scale changes
@@ -119,18 +141,19 @@ class Teleop:
         self._prepinch = hand.pinch >= (c.prepinch_off if self._prepinch else c.prepinch_on)
 
     # --- per tick -------------------------------------------------------------------
-    def _fresh(self, hand: HandState, now: float) -> bool:
+    def fresh(self, hand: HandState, now: float) -> bool:
         return (hand.present and hand.confidence >= self.cfg.min_conf
-                and now - hand.t <= self.cfg.lost_timeout)
+                and now - hand.t <= self.cfg.lost_timeout
+                and (not self.cfg.direct_hand or (np.all(np.isfinite(hand.pos)) and hand.pos[2] > 0)))
 
     def update(self, hand: HandState, engage: bool, now: float, dt: float = 0.05,
-               near_dist: float | None = None):
+               near_dist: float | None = None, keys: str = ""):
         """Returns (tcp_target, grip). engage = operator wants the arm to follow.
 
         near_dist: distance (m) from the TCP to the closest graspable object, if known.
         """
         c = self.cfg
-        fresh = self._fresh(hand, now)
+        fresh = self.fresh(hand, now)
         if fresh:
             self._auto_triggers(hand, near_dist)
         self.flags = {"tracking_lost": not fresh, "workspace_edge": False,
@@ -156,26 +179,81 @@ class Teleop:
         elif self.mode == HOLD and fresh:
             self.mode = ENGAGED
 
+        if c.gesture_planes:
+            if self.mode == ENGAGED and hand.v_sign:
+                if self._v_since is None:
+                    self._v_since = hand.t
+                if not self._v_switched and hand.t - self._v_since >= 0.35:
+                    self.height_mode = not self.height_mode
+                    self._v_switched = True
+                self._hand0 = None
+                return self.target, self.grip
+            self._v_since = None
+            self._v_switched = False
+
         if self.mode != ENGAGED:
             return self.target, self.grip
 
         # gripper first: anchoring below must never delay a grasp by a tick
+        was_open = self.grip > 0.5
         if hand.pinch >= c.pinch_close:
             self.grip = 0.0
         elif hand.pinch <= c.pinch_open:
             self.grip = 1.0
+        if c.fruit_feedback and was_open and self.grip < 0.5:
+            self._hand0 = None  # closing fingers can shift the measured palm centre
         if self.precise != self._was_precise:  # depends on grip (auto only while open)
             self._was_precise = self.precise
             self._hand0 = None  # re-anchor so the scale change doesn't jump
         self.flags["precision"] = self.precise
 
         if self._hand0 is None:  # (re)anchor: zero motion on this tick
+            self._filt = raw.copy()  # discard motion accumulated before the anchor
+            self._distance_ratio = 1.0
             self._hand0, self._tcp0 = self._filt.copy(), self.target.copy()
             return self.target, self.grip
 
         k = c.precision if self.precise else 1.0
-        want = self._tcp0 + k * (c.axes @ (c.scale * (self._filt - self._hand0)))
-        want, edge = self.ws.clamp(want)
+        motion = self._filt - self._hand0
+        if c.direct_hand:
+            # Apparent palm span varies inversely with distance. Calibrate at
+            # each anchor and absorb small variations in the monocular estimate.
+            ratio = self._hand0[2] / self._filt[2]
+            self._distance_ratio = float(np.clip(self._distance_ratio, ratio - 0.025, ratio + 0.025))
+            # An off-centre wrist projects farther from the image centre as it
+            # approaches the lens, even with no physical x/y movement.
+            motion[:2] = (self._filt[:2] - 0.5) * self._distance_ratio - (self._hand0[:2] - 0.5)
+            motion[2] = 1.0 - self._distance_ratio
+        delta = c.scale * motion
+        if c.gesture_planes:
+            if self.height_mode:
+                delta = np.array([0.0, delta[1], 0.0])
+            else:
+                delta = np.array([delta[0], 0.0, delta[1]])
+        if c.keyboard_axes:
+            delta[1:] = 0
+            if self.grip < 0.5 and ("k" in keys or "j" in keys):
+                # A keyed lift/lower keeps the current sideways command. Rebase
+                # that axis so wrist motion on this tick cannot be replayed later.
+                self._filt[0] = self._hand0[0] = raw[0]
+                side = c.axes[:, 0]
+                self._tcp0 += side * np.dot(self.target - self._tcp0, side)
+                delta[0] = 0
+            # Each key event moves the persistent anchor 5 mm. Clamp below
+            # discards excess at the workspace walls, even on repeated keys.
+            depth = int("w" in keys) - int("s" in keys)
+            height = int("k" in keys) - int("j" in keys)
+            self._tcp0 += 0.005 * (depth * c.axes[:, 2] + height * c.axes[:, 1])
+        want = self._tcp0 + k * (c.axes @ delta)
+        clamped, edge = self.ws.clamp(want)
+        if c.fruit_feedback:
+            limits = ("sideways", "depth", "height")
+            self.flags["blocked_axes"] = [name for name, excess in zip(limits, want - clamped)
+                                          if abs(excess) > 1e-6]
+        # Discard travel beyond each wall so reversing the hand moves the arm
+        # back immediately, while motion parallel to the wall stays continuous.
+        self._tcp0 += clamped - want
+        want = clamped
         step = want - self.target
         n = float(np.linalg.norm(step))
         if n >= c.deadband:

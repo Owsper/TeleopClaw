@@ -25,6 +25,7 @@ class HandState:
     fist: bool = False                   # clutch gesture
     open_palm: bool = False              # optional stop gesture
     handedness: str = "right"            # "right" | "left"
+    v_sign: bool = False                 # index and middle extended, ring and pinky curled
 
 
 @dataclass

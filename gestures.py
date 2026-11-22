@@ -15,7 +15,7 @@ class Gestures:
         self._open_anchor = None
         self._filtered_pinch = None
 
-    def update(self, px: np.ndarray, t: float) -> HandState:
+    def update(self, px: np.ndarray, t: float, depth_px: np.ndarray | None = None) -> HandState:
         px = np.asarray(px, dtype=np.float32)
         if px.shape != (21, 2):
             raise ValueError("Expected 21 hand landmarks with (x, y) positions")
@@ -72,5 +72,16 @@ class Gestures:
             self._open_anchor = wrist.copy()
         stop = bool(self._open_since is not None and t - self._open_since >= 1.0)
 
+        # Image-relative z compensates for knuckles rotating toward the lens.
+        # Keep the original 2D palm length for the tuned gesture thresholds.
+        palm_span = None
+        if depth_px is not None:
+            knuckles = [5, 9, 13, 17]
+            offsets = np.column_stack((px[knuckles] - px[0],
+                                       depth_px[knuckles] - depth_px[0]))
+            palm_span = float(np.median(np.linalg.norm(offsets, axis=1)))
+            if not np.isfinite(palm_span):
+                return HandState.invalid(t)
+
         return HandState(True, t, px, palm, float(self._filtered_pinch),
-                         self._fist, stop)
+                         self._fist, stop, palm_span)
