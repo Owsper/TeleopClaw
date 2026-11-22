@@ -21,13 +21,27 @@ def status(tick, runner, rec=None, now: float | None = None) -> list[tuple[str, 
     """Bar items as (text, BGR colour), in the order of the spec."""
     now = time.monotonic() if now is None else now
     hand = tick.hand
-    tracking = bool(hand.present) and not tick.flags.get("tracking_lost")
-    engaged = tick.mode == "ENGAGED"
-    items = [("TRACKING " + ("OK" if tracking else "--"), GREEN if tracking else RED),
-             ("ENGAGED " + ("OK" if engaged else "--"), GREEN if engaged else GREY)]
+    if tick.left_hand is None:
+        tracking = hand.present and not tick.flags.get("tracking_lost")
+        engaged = tick.mode == "ENGAGED"
+        items = [("TRACKING " + ("OK" if tracking else "--"), GREEN if tracking else RED),
+                 ("ENGAGED " + ("OK" if engaged else "--"), GREEN if engaged else GREY)]
+        pinch_text = f"pinch {hand.pinch:.2f}"
+    else:
+        items = []
+        for side, sample, mode in (("left", tick.left_hand, runner.left_arm.teleop.mode),
+                                   ("right", hand, tick.mode)):
+            tracked = sample.present and not tick.flags[side].get("tracking_lost")
+            text = f"{side.upper()} {mode}  pinch {sample.pinch:.2f}" if tracked else f"{side.upper()} --"
+            color = GREEN if tracked and mode == "ENGAGED" else GREY
+            items.append((text, color))
+        # Both detections use the same capture timestamp.
+        hand = hand if hand.present else tick.left_hand
+        pinch_text = None
     if rec is not None:
         items.append(("REC" if rec.ep is not None else "rec", RED if rec.ep is not None else GREY))
-    items.append((f"pinch {hand.pinch:.2f}", WHITE))
+    if pinch_text:
+        items.append((pinch_text, WHITE))
     if hand.present and hand.t:
         items.append((f"latency {max(0.0, now - hand.t) * 1000:.0f} ms", WHITE))
     if rec is not None:

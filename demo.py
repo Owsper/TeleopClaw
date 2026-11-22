@@ -16,7 +16,7 @@ CONNECTIONS = (
 )
 
 
-def draw(frame, state, fps, keyboard_axes=False, gesture_planes=False, direct_hand=False):
+def draw_landmarks(frame, state, label=""):
     if state.valid:
         pts = [(int(x), int(y)) for x, y in state.px]
         for i, j in CONNECTIONS:
@@ -26,6 +26,12 @@ def draw(frame, state, fps, keyboard_axes=False, gesture_planes=False, direct_ha
         cv2.circle(frame, pts[4], 7, (255, 90, 255), 2)
         cv2.circle(frame, pts[8], 7, (255, 90, 255), 2)
 
+        if label:
+            cv2.putText(frame, label, pts[0], cv2.FONT_HERSHEY_SIMPLEX, 0.65, (40, 240, 255), 2)
+
+
+def draw(frame, state, fps, keyboard_axes=False, gesture_planes=False, direct_hand=False):
+    draw_landmarks(frame, state)
     info = [
         f"TRACKING: {'YES' if state.valid else 'NO'}   FPS: {fps:.1f}",
         f"PINCH (0 closed, 1 open): {state.pinch:.2f}",

@@ -1,4 +1,4 @@
-"""Drive the right YAM arm from the webcam or mouse at 20 Hz.
+"""Drive the YAM arms from the webcam or mouse at 20 Hz.
 
     python run_teleop.py            # open palm starts, move in 3D, pinch closes
     python run_teleop.py --pose-assist  # A primes a level-forearm cue to approach the apple
@@ -39,6 +39,29 @@ DT = 0.05
 def control_hint(tick, runner, pose_hint, mouse=False):
     if pose_hint:
         return pose_hint
+    if runner.left_arm and tick.flags.get("left") and not runner.approaching:
+        active = [arm for arm in (runner.left_arm, runner) if arm.engage]
+        if not active:
+            if any(arm.teleop.mode != DISARMED for arm in (runner, runner.left_arm)):
+                return "Follow paused. Press F to resume the armed claws."
+            return "Hold each open palm still for 1s to start its matching arm."
+        for arm in active:
+            side_flags = tick.flags[arm.side]
+            if side_flags.get("between_jaws"):
+                return f"{arm.side.title()} holding {side_flags['between_jaws']}. Pinch and raise to lift."
+        if any(tick.flags[arm.side].get("readying") for arm in active):
+            return "Keep your open palm visible while its arm moves into position."
+        if any(tick.flags[arm.side].get("tracking_lost") for arm in active):
+            return "Missing hand: its arm holds. Bring that hand back into view."
+        for arm in active:
+            side_flags = tick.flags[arm.side]
+            if side_flags.get("ik_reject") or side_flags.get("blocked_axes"):
+                return f"{arm.side.title()} arm at reach limit. Move back toward its last position."
+            if side_flags.get("clutch"):
+                return f"{arm.side.title()} arm paused. Relax that fist to move."
+            if arm.grip < 0.5:
+                return f"{arm.side.title()} claw closed without two-jaw contact. Open and adjust."
+        return "Aim L or R at the fruit, lower that hand, then pinch."
     if tick.mode == DISARMED:
         if runner.teleop.cfg.gesture_planes or runner.teleop.cfg.direct_hand:
             return "Hold a still open palm for 1 second to start."
@@ -95,10 +118,14 @@ def control_hint(tick, runner, pose_hint, mouse=False):
 def draw_aim_map(img, runner, tcp):
     """Table-plane inset sharing the operator's left/right and W/S directions."""
     ws, axes = runner.teleop.ws, runner.teleop.cfg.axes
-    center = (ws.lo + ws.hi) / 2
+    lo, hi = ws.lo, ws.hi
+    if runner.left_arm:
+        lo = np.minimum(lo, runner.left_arm.teleop.ws.lo)
+        hi = np.maximum(hi, runner.left_arm.teleop.ws.hi)
+    center = (lo + hi) / 2
     height, width = img.shape[:2]
     origin = np.array([width - 85, height - 52])
-    scale = min(148 / (ws.hi[0] - ws.lo[0]), 74 / (ws.hi[1] - ws.lo[1]))
+    scale = min(148 / (hi[0] - lo[0]), 74 / (hi[1] - lo[1]))
 
     def pixel(pos):
         delta = pos - center
@@ -112,6 +139,13 @@ def draw_aim_map(img, runner, tcp):
                         ("banana", (45, 220, 235))):
         if name in runner.objects:
             cv2.circle(img, pixel(runner.sim.data.body(name).xpos), 5, color, -1, cv2.LINE_AA)
+    if runner.left_arm:
+        for arm in (runner.left_arm, runner):
+            x, y = pixel(arm.tcp())
+            cv2.drawMarker(img, (x, y), (255, 255, 255), cv2.MARKER_CROSS, 12, 1, cv2.LINE_AA)
+            cv2.putText(img, arm.side[0].upper(), (x + 4, y - 4), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.4, (255, 255, 255), 1, cv2.LINE_AA)
+        return
     cv2.drawMarker(img, pixel(tcp), (255, 255, 255), cv2.MARKER_CROSS, 17, 1, cv2.LINE_AA)
 
 
@@ -123,6 +157,9 @@ def draw_hud(img, tick, runner, rec=None, hint=""):
              f"{'  PRECISION' if runner.teleop.precise else ''}",
              "tcp " + " ".join(f"{v:+.3f}" for v in tick.tcp) + f"  grip {runner.grip:.0f}",
              f"step {f.get('step_ms', 0):.0f} ms  ik {f.get('ik_err_mm', '-')} mm"]
+    if runner.left_arm:
+        lines[:2] = [f"{arm.side.upper()}  {arm.teleop.mode}  claw {'open' if arm.grip else 'closed'}"
+                     for arm in (runner.left_arm, runner)]
     for i, s in enumerate(lines):
         cv2.putText(img, s, (8, 20 + 20 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     if rec is not None:
@@ -192,21 +229,22 @@ def main() -> int:
         ap.error(f"missing {POSE_MODEL}; see the pose assist setup in README.md")
 
     from dreamhands.trials import Referee
+    direct = not (args.mouse or args.hand_3d or args.keyboard_axes or args.gesture_planes)
     runner = TeleopRunner(prefer_pinch=not args.mouse,
                           keyboard_axes=args.keyboard_axes,
                           gesture_planes=args.gesture_planes,
-                          direct_hand=not (args.mouse or args.hand_3d or args.keyboard_axes or args.gesture_planes))
+                          direct_hand=direct, bimanual=direct)
     cv2.namedWindow(WIN)
     if args.mouse:
         from dreamhands.fake_tracker import MouseTracker
         tracker = MouseTracker(WIN)
     else:  # A's webcam + MediaPipe tracker (needs hand_landmarker.task, see README)
         from dreamhands.a_tracker import ATracker, from_a
-        from demo import draw as draw_tracking
-        tracker = ATracker(args.camera, pose_model=POSE_MODEL if args.pose_assist else None)
+        from demo import draw as draw_tracking, draw_landmarks
+        tracker = ATracker(args.camera, pose_model=POSE_MODEL if args.pose_assist else None, both_hands=direct)
         if args.split:
             cv2.namedWindow(WEBCAM_WIN)
-    referee =Referee(runner.sim) if args.trials or args.record else None
+    referee = Referee(runner.sim) if args.trials or args.record else None
     rec = None
     if args.record:
         from dreamhands.recorder import Recorder
@@ -225,7 +263,7 @@ def main() -> int:
                         "reason": verdict.reason or "skipped", "seconds": round(referee.t, 1)})
         ok = sum(r["success"] for r in results)
         print(f"trial {len(results)}/{args.trials}: {results[-1]['reason']}  -> {ok}/{len(results)}")
-        runner.sim.reset()
+        runner.reset_scene()
         runner.engage = False
         runner.go_ready()
         referee.reset()
@@ -243,14 +281,16 @@ def main() -> int:
             break
         if k == ord(" "):
             cue_until = 0.0
-            if runner.teleop.mode == DISARMED:
+            if runner.teleop.mode == DISARMED and not (runner.left_arm and runner.left_arm.engage):
                 runner.go_ready()
             else:
-                runner.teleop.disarm()
-                runner.engage = False
+                runner.disarm()
+                if runner.left_arm:
+                    runner.left_arm.disarm()
         elif k == ord("f"):
-            if runner.teleop.mode == DISARMED:
-                runner.go_ready()
+            if (runner.teleop.mode == DISARMED and
+                    (runner.left_arm is None or runner.left_arm.teleop.mode == DISARMED)):
+                runner.arm_from_palm()
             keys = "f"
             cue_until = 0.0
         elif k == ord("g"):
@@ -281,7 +321,7 @@ def main() -> int:
         elif k != 255:
             keys = chr(k)
 
-        camera_frame = arm = None
+        camera_frame = arm = left_hand = None
         if args.mouse:
             hand = tracker.read()
         else:
@@ -291,9 +331,12 @@ def main() -> int:
                 tracker.tracker.scan_pose.set()
             else:
                 tracker.tracker.scan_pose.clear()
-            camera_frame, camera_hand, fps, arm, pose_time = tracker.tracker.preview()
+            camera_frame, states, fps, arm, pose_time = tracker.tracker.preview(both=True)
+            camera_hand = states["right"]
             height, width = camera_frame.shape[:2] if camera_frame is not None else (480, 640)
             hand = from_a(camera_hand, width, height, wrist_origin=runner.teleop.cfg.direct_hand)
+            if direct:
+                left_hand = from_a(states["left"], width, height, wrist_origin=True, side="left")
         now = time.monotonic()
         pose_hint = ""
         if cue_until:
@@ -318,7 +361,7 @@ def main() -> int:
                     cue_until = 0.0
                     pose_hint = ""
                     runner.start_apple_approach()
-        tick = runner.tick(hand, keys, now=now)
+        tick = runner.tick(hand, keys, now=now, left_hand=left_hand)
         if tick.events:
             print("events:", tick.events)
         if rec is not None:
@@ -331,14 +374,14 @@ def main() -> int:
                 ended = True
             if ended:  # fresh scene for the next episode
                 cue_until = 0.0
-                runner.sim.reset()
+                runner.reset_scene()
                 if not args.fixed:
                     scatter(runner.sim)
                 runner.engage = False
                 runner.go_ready()
                 referee.reset()
             runner.record_images = rec.ep is not None  # 3 cameras only while recording
-        if args.trials and runner.teleop.mode != DISARMED:
+        if args.trials and (runner.teleop.mode != DISARMED or (runner.left_arm and runner.left_arm.engage)):
             v = referee(tick)
             if v.done or "next" in tick.events:
                 cue_until = 0.0
@@ -353,8 +396,12 @@ def main() -> int:
         hint = control_hint(tick, runner, pose_hint, mouse=args.mouse)
         hud = draw_hud(frame, tick, runner, rec, hint)
         if camera_frame is not None:
-            draw_tracking(camera_frame, camera_hand, fps, keyboard_axes=args.keyboard_axes,
-                          gesture_planes=args.gesture_planes, direct_hand=runner.teleop.cfg.direct_hand)
+            if direct:
+                for side, state in states.items():
+                    draw_landmarks(camera_frame, state, side.upper())
+            else:
+                draw_tracking(camera_frame, camera_hand, fps, keyboard_axes=args.keyboard_axes,
+                              gesture_planes=args.gesture_planes)
             draw_pose_cue(camera_frame, arm, hint)
         if args.split:
             cv2.imshow(WIN, hud)

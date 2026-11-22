@@ -17,9 +17,10 @@ PALM_IDX = [0, 5, 9, 13, 17]
 PALM_REF = 200.0  # px; wrist->middle-knuckle is ~60-140 px at arm's length
 
 
-def from_a(h, width: int = 640, height: int = 480, *, wrist_origin: bool = False) -> HandState:
+def from_a(h, width: int = 640, height: int = 480, *, wrist_origin: bool = False,
+           side: str = "right") -> HandState:
     if not h.valid:
-        return HandState(t=h.t, present=False)
+        return HandState(t=h.t, present=False, handedness=side)
     px = np.asarray(h.px, float)
     c = px[0] if wrist_origin else px[PALM_IDX].mean(0)
     reach = np.linalg.norm(px - px[0], axis=1)
@@ -31,15 +32,15 @@ def from_a(h, width: int = 640, height: int = 480, *, wrist_origin: bool = False
     pos = np.array([c[0] / width, 1.0 - c[1] / height, depth])
     return HandState(t=h.t, present=True, confidence=1.0, pos=pos,
                      pinch=float(1.0 - h.pinch), fist=bool(h.fist),
-                     open_palm=bool(h.stop), handedness="right", v_sign=bool(v_sign))
+                     open_palm=bool(h.stop), handedness=side, v_sign=bool(v_sign))
 
 
 class ATracker:
     """Wraps A's HandTracker (webcam + MediaPipe) behind the same read() as MouseTracker."""
 
-    def __init__(self, camera_index: int = 0, pose_model: str | None = None):
+    def __init__(self, camera_index: int = 0, pose_model: str | None = None, both_hands: bool = False):
         from hand_tracker import HandTracker  # A's module at the repo root
-        self.tracker = HandTracker(camera_index=camera_index, pose_model=pose_model).start()
+        self.tracker = HandTracker(camera_index=camera_index, pose_model=pose_model, both_hands=both_hands).start()
 
     def read(self) -> HandState:
         return from_a(self.tracker.latest())

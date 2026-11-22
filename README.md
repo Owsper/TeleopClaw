@@ -1,6 +1,6 @@
 # TeleopClaw (DreamHands)
 
-Webcam hand teleop for the official Dream Labs YAM MuJoCo sim: your hand drives the right
+Webcam hand teleop for the official Dream Labs YAM MuJoCo sim: each hand drives its matching
 YAM arm, we record demonstrations, and the team fine-tunes Dream-1 on them. A take-over mode
 lets a human grab control back from the policy mid-episode.
 
@@ -25,7 +25,7 @@ never printed, logged or committed. Nothing in the teleop loop calls the Dream A
 ## Drive the arm
 
 ```bash
-python run_teleop.py                       # direct 3D webcam control
+python run_teleop.py                       # direct 3D webcam control of both arms
 python run_teleop.py --gesture-planes      # optional V sign to switch AIM/HEIGHT
 python run_teleop.py --keyboard-axes       # optional W/S depth and J/K height
 python run_teleop.py --hand-3d             # previous all-hand mapping, with open-palm stop
@@ -55,7 +55,14 @@ python run_teleop.py --mouse --trials 10   # apple go/no-go, results -> trials.j
 | `r` / `n` / `x` | record / next / discard events for the recorder (in trials `n` = give up) |
 | `q` / `Esc` | quit |
 
-For a one-hand pick, center your hand and hold your open palm still for one second.
+In the default webcam mode, your left hand controls the left arm and your right hand
+controls the right arm. Use either hand alone or both together. Center each hand on
+its side of the preview and hold its open palm still for one second to start that arm.
+Keep it visible as the arm moves to its ready position. Each wrist has its own anchor
+and each pinch closes only its matching claw. If one hand goes out of view, its arm
+holds while the other continues. The webcam labels the hands LEFT and RIGHT, and
+the top view labels the claws L and R. Space disarms both when either is active.
+The optional mouse, keyboard-axis and alternate gesture modes drive the right arm.
 The wrist controls sideways motion and height. Move toward or away from the lens to
 adjust depth. All three directions are active together. Use the top-view cross to
 align with a fruit, lower your hand, then pinch. When the HUD reports contact on
@@ -102,7 +109,7 @@ Keep pinching while you lift. If you need to pause with the claw closed, press `
 
 ## Hand tracker (A)
 
-Single hand, mirrored 640x480 webcam, MediaPipe 21 landmarks, normalized pinch, debounced fist/clutch and stationary open-palm stop. **Robot control is deliberately not implemented here.**
+Up to two hands, mirrored 640x480 webcam, MediaPipe 21 landmarks, normalized pinch, debounced fist/clutch and stationary open-palm stop. **Robot control is deliberately not implemented here.**
 
 ### macOS quick start
 
@@ -155,7 +162,7 @@ Use `FakeTracker().latest()` for a mock HandState without a webcam.
 
 - Webcam capture and landmark inference have independent threads. The newest frame overwrites old ones, avoiding queue buildup.
 - `VIDEO` mode processes captured frames with monotonic millisecond timestamps. Display runs in the main thread for macOS OpenCV compatibility.
-- The frame is mirrored **before** landmark detection. MediaPipe handedness labels for mirrored inputs can be misleading, so this starter does not use them.
+- The camera mirrors frames before landmark detection. In two-hand mode the adapter reverses the bundled Tasks model’s handedness labels to recover anatomical left and right. Ambiguous or missing assignments hold the affected arm.
 - Pinch values are estimates, not calibrated force/gripper width. Tune `0.25 / 0.95` in `gestures.py` for the operator.
 - The all-fingers-curled fist rule sometimes fails when a fist is viewed edge-on; adjust gesture margin thresholds empirically.
 - Webcam depth uses the apparent 3D span from wrist to knuckles. Relative landmark depth helps compensate when you tilt your palm during a sideways slide. The result is still a single-camera estimate.

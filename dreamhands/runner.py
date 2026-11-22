@@ -64,16 +64,24 @@ def default_async() -> bool:
     return sys.platform == "win32"
 
 
-class TeleopRunner:
-    def __init__(self, sim: Sim | None = None, teleop: Teleop | None = None,
-                 record_images: bool = False, image_every: int = 2,
-                 async_images: bool | None = None, prefer_pinch: bool = True,
-                 keyboard_axes: bool = False, gesture_planes: bool = False, direct_hand: bool = False):
-        self.sim = sim or Sim()
-        self.ik = ArmIK(self.sim.model)
+class ArmController:
+    """Per-arm input, grasp and IK state. Both arms share the same physics world."""
+    def __init__(self, sim, side, teleop=None, prefer_pinch=True, keyboard_axes=False,
+                 gesture_planes=False, direct_hand=False, independent_ready=True):
+        self.sim, self.side = sim, side
+        self._ready_path: deque[np.ndarray] = deque()
+        self.ik = ArmIK(sim.model, side=side)
         if teleop is None:
             ready = np.r_[READY_TCP[:2], APPLE_HOVER_Z] if gesture_planes or direct_hand else READY_TCP
+            ready = ready.copy()
+            if independent_ready:
+                ready[0] = 0.12 if side == "left" else -0.12  # clearance between the two open claws
+            elif side == "left":
+                ready[0] *= -1
             teleop = Teleop(ready)
+            if side == "left":
+                ws = teleop.ws
+                ws.lo[0], ws.hi[0] = -ws.hi[0], -ws.lo[0]
             teleop.cfg.axes = camera_axes(self.sim, "top")
         if keyboard_axes or gesture_planes or direct_hand:
             teleop.cfg.direct_hand = direct_hand
@@ -86,16 +94,7 @@ class TeleopRunner:
             teleop.cfg.auto_precision = False
             teleop.cfg.scale[0] = 0.85  # quarter-frame sweep reaches the stock apple
         self.teleop = teleop
-        self.record_images, self.image_every = record_images, image_every
-        self.async_images = default_async() if async_images is None else async_images
-        self._worker = None
-        self._queue: deque[Tick] = deque()   # ticks not yet delivered, in step order
-        self._waiting: set[int] = set()      # steps whose images are still rendering
-        self._done: dict[int, dict] = {}     # finished renders not yet attached
-        self.last_images: dict | None = None  # newest delivered images (HUD)
-        self.on_tick: list[Callable[[Tick], None]] = []
-        self.left = HOME.copy()
-        self.q = self.sim.state()["right"][:6].copy()  # commanded right joints
+        self.q = self.sim.state()[side][:6].copy()
         self.grip = 1.0
         self.step_i = 0
         self.engage = False
@@ -111,65 +110,22 @@ class TeleopRunner:
 
     # --- helpers ----------------------------------------------------------------------
     def tcp(self) -> np.ndarray:
-        return self.sim.data.site("right_tcp").xpos.copy()
+        return self.sim.data.site(f"{self.side}_tcp").xpos.copy()
 
-    def right_cmd(self) -> np.ndarray:
+    def command(self) -> np.ndarray:
         return np.r_[self.q, self.grip]
 
-    # --- image delivery -------------------------------------------------------------
-    def _render_worker(self):
-        if self._worker is None and self.async_images and self.sim.can_render:
-            from .render_worker import RenderWorker
-            self._worker = RenderWorker(self.sim.model)
-            if not self._worker.ok:
-                self._worker, self.async_images = None, False
-        return self._worker
-
-    def _deliver(self, block: bool = False) -> None:
-        """Emit queued ticks in order; block = wait for every pending render."""
-        if self._worker is not None:
-            self._done.update(self._worker.poll())
-        while self._queue:
-            t = self._queue[0]
-            if t.step in self._waiting:
-                while t.step not in self._done:
-                    if not block and self.step_i - t.step < MAX_LAG:
-                        return
-                    step, imgs = self._worker.wait()
-                    self._done[step] = imgs
-                t.images = self._done.pop(t.step)
-                self._waiting.discard(t.step)
-            if t.images is not None:
-                self.last_images = t.images
-            self._queue.popleft()
-            for fn in self.on_tick:
-                fn(t)
-
-    def warm_images(self) -> None:
-        """Start the render threads now (~0.2 s) instead of on the first recorded tick."""
-        self._render_worker()
-
-    def flush(self) -> None:
-        """Deliver every tick produced so far (waits for in-flight renders)."""
-        self._deliver(block=True)
-
-    def close(self) -> None:
-        self.flush()
-        if self._worker is not None:
-            self._worker.close()
-            self._worker = None
-
     def near_dist(self) -> float | None:
-        """Distance (m) from the right TCP to the closest scene object, None if none."""
+        """Distance (m) from the active TCP to the closest scene object, None if none."""
         if not self.objects:
             return None
         tcp = self.tcp()
         return min(float(np.linalg.norm(self.sim.data.body(o).xpos - tcp)) for o in self.objects)
 
     def object_between_jaws(self) -> str | None:
-        """Return a scene object with active contacts on both right fingertips."""
+        """Return a scene object with active contacts on both fingertips."""
         model = self.sim.model
-        left, right = model.body("right_tip_left").id, model.body("right_tip_right").id
+        left, right = model.body(f"{self.side}_tip_left").id, model.body(f"{self.side}_tip_right").id
         touched = {left: set(), right: set()}
         for contact in self.sim.data.contact:
             if contact.efc_address < 0:
@@ -182,29 +138,33 @@ class TeleopRunner:
         shared = touched[left] & touched[right]
         return next((name for name in self.objects if model.body(name).id in shared), None)
 
-    def go_ready(self, seconds: float = 2.0, hz: float = 20.0) -> float:
-        """Interpolate joints to the top-down ready pose, arm the teleop, return pos_err (m)."""
+    def disarm(self):
+        self.teleop.disarm()
+        self.engage = False
+        self._ready_path.clear()
+        self._approach.clear()
+
+    def arm_from_palm(self):
+        self.begin_ready()
+
+    def begin_ready(self, seconds=2.0, hz=20.0):
         self._approach.clear()
         self.approach_message = ""
-        q0 = self.sim.state()["right"][:6].copy()
+        q0 = self.sim.state()[self.side][:6].copy()
         n = max(1, int(seconds * hz))
+        self._ready_path.clear()
         for i in range(1, n + 1):
-            a = 0.5 - 0.5 * np.cos(np.pi * i / n)  # smooth start/stop
-            self.q = (1 - a) * q0 + a * self._ready_q
-            self.sim.step(self.left, np.r_[self.q, 1.0])
-        for _ in range(10):  # settle
-            self.sim.step(self.left, np.r_[self.q, 1.0])
+            a = 0.5 - 0.5 * np.cos(np.pi * i / n)
+            self._ready_path.append((1 - a) * q0 + a * self._ready_q)
+        self._ready_path.extend([self._ready_q] * 10)
         self.grip = 1.0
         self.teleop.arm()
-        err = float(np.linalg.norm(self.tcp() - self.teleop.ready_tcp))
-        print(f"go_ready: pos_err {err * 1000:.1f} mm")
-        return err
 
     def take_over(self) -> None:
         """Hand control back to the human mid-episode: start from measured joints."""
         if self.approaching:
             self.cancel_apple_approach()
-        meas = self.sim.state()["right"]
+        meas = self.sim.state()[self.side]
         self.q, self.grip = meas[:6].copy(), float(meas[6])
         self.teleop.rebase(self.tcp())
 
@@ -265,10 +225,7 @@ class TeleopRunner:
                                          if self.engage else "Above apple. F resumes hand control.")
 
     # --- one tick ---------------------------------------------------------------------
-    def tick(self, hand: HandState, keys: str = "", now: float | None = None) -> Tick:
-        t0 = time.perf_counter()
-        now = time.monotonic() if now is None else now
-        events = [KEY_EVENTS[k] for k in keys if k in KEY_EVENTS]
+    def update_command(self, hand: HandState, keys: str, now: float) -> dict:
         flags = {"ik_reject": False}
 
         guiding = self.approaching
@@ -280,7 +237,7 @@ class TeleopRunner:
         if palm_stop and not guiding and self.teleop.fresh(hand, now):
             if self.teleop.cfg.gesture_planes or self.teleop.cfg.direct_hand:
                 if self.teleop.mode == DISARMED:
-                    self.go_ready()
+                    self.arm_from_palm()
                     self.engage = True
             elif not self.teleop.cfg.keyboard_axes:
                 self.engage = False
@@ -300,6 +257,16 @@ class TeleopRunner:
                              and self.teleop.fresh(hand, now))
                 self.engage = not following
                 self.approach_message = ""
+        if self._ready_path:
+            if self.teleop.mode == DISARMED:
+                self._ready_path.clear()
+            elif self.teleop.fresh(hand, now) and self.engage and not clutch:
+                self.q = self._ready_path.popleft()
+                flags["readying"] = bool(self._ready_path)
+                return flags
+            else:
+                flags.update(readying=True, tracking_lost=not self.teleop.fresh(hand, now), clutch=clutch)
+                return flags
         flags["clutch"] = clutch
         engage = self.engage and not clutch
         previous_target = self.teleop.target
@@ -330,9 +297,130 @@ class TeleopRunner:
                     flags["ik_reject"] = True
             self.grip = grip
 
+        return flags
+
+
+class TeleopRunner(ArmController):
+    def __init__(self, sim: Sim | None = None, teleop: Teleop | None = None,
+                 record_images: bool = False, image_every: int = 2,
+                 async_images: bool | None = None, prefer_pinch: bool = True,
+                 keyboard_axes: bool = False, gesture_planes: bool = False, direct_hand: bool = False, bimanual: bool = False):
+        sim = sim or Sim()
+        super().__init__(sim, "right", teleop, prefer_pinch, keyboard_axes, gesture_planes, direct_hand,
+                         independent_ready=bimanual)
+        self.left_arm = (ArmController(sim, "left", direct_hand=True, independent_ready=True)
+                         if bimanual else None)
+        self.left = HOME.copy()
+        self.record_images, self.image_every = record_images, image_every
+        self.async_images = default_async() if async_images is None else async_images
+        self._worker = None
+        self._queue: deque[Tick] = deque()   # ticks not yet delivered, in step order
+        self._waiting: set[int] = set()      # steps whose images are still rendering
+        self._done: dict[int, dict] = {}     # finished renders not yet attached
+        self.last_images: dict | None = None  # newest delivered images (HUD)
+        self.on_tick: list[Callable[[Tick], None]] = []
+
+    def go_ready(self, seconds: float = 2.0, hz: float = 20.0) -> float:
+        """Interpolate joints to the top-down ready pose, arm the teleop, return pos_err (m)."""
+        self.begin_ready(seconds, hz)
+        while self._ready_path:
+            self.q = self._ready_path.popleft()
+            self.sim.step(self.left, self.command())
+        return float(np.linalg.norm(self.tcp() - self.teleop.ready_tcp))
+
+    def arm_from_palm(self):
+        if self.left_arm:
+            self.begin_ready()
+        else:
+            self.go_ready()
+
+    def right_cmd(self):
+        return self.command()
+
+    def reset_scene(self):
+        self.sim.reset()
+        if self.left_arm:
+            self.left_arm.disarm()
+            self.left_arm.q = self.sim.state()["left"][:6].copy()
+            self.left_arm.grip = 1.0
+            self.left = self.left_arm.command()
+
+    # --- image delivery -------------------------------------------------------------
+    def _render_worker(self):
+        if self._worker is None and self.async_images and self.sim.can_render:
+            from .render_worker import RenderWorker
+            self._worker = RenderWorker(self.sim.model)
+            if not self._worker.ok:
+                self._worker, self.async_images = None, False
+        return self._worker
+
+    def _deliver(self, block: bool = False) -> None:
+        """Emit queued ticks in order; block = wait for every pending render."""
+        if self._worker is not None:
+            self._done.update(self._worker.poll())
+        while self._queue:
+            t = self._queue[0]
+            if t.step in self._waiting:
+                while t.step not in self._done:
+                    if not block and self.step_i - t.step < MAX_LAG:
+                        return
+                    step, imgs = self._worker.wait()
+                    self._done[step] = imgs
+                t.images = self._done.pop(t.step)
+                self._waiting.discard(t.step)
+            if t.images is not None:
+                self.last_images = t.images
+            self._queue.popleft()
+            for fn in self.on_tick:
+                fn(t)
+
+    def warm_images(self) -> None:
+        """Start the render threads now (~0.2 s) instead of on the first recorded tick."""
+        self._render_worker()
+
+    def flush(self) -> None:
+        """Deliver every tick produced so far (waits for in-flight renders)."""
+        self._deliver(block=True)
+
+    def close(self) -> None:
+        self.flush()
+        if self._worker is not None:
+            self._worker.close()
+            self._worker = None
+
+    def tick(self, hand: HandState, keys: str = "", now: float | None = None,
+             left_hand: HandState | None = None) -> Tick:
+        t0 = time.perf_counter()
+        now = time.monotonic() if now is None else now
+        events = [KEY_EVENTS[k] for k in keys if k in KEY_EVENTS]
+        if self.left_arm and "f" in keys and not self.approaching:
+            # Pause/resume the armed pair together, including a left-only session.
+            inputs = ((self, hand), (self.left_arm, left_hand or HandState()))
+            following = any(arm.engage and
+                            (arm._ready_path or (arm.teleop.mode == ENGAGED and arm.teleop.fresh(sample, now)))
+                            for arm, sample in inputs)
+            for arm, _ in inputs:
+                if arm.teleop.mode != DISARMED:
+                    arm.engage = not following
+                    arm.approach_message = ""
+            keys = keys.replace("f", "")
+        flags = self.update_command(hand, keys, now)
+        if self.left_arm:
+            self.left_arm.step_i = self.step_i
+            left_flags = self.left_arm.update_command(left_hand or HandState(), "", now)
+            self.left = self.left_arm.command()
+            flags["right"] = flags.copy()
+            flags["left"] = left_flags
+            for name in ("tracking_lost", "ik_reject", "workspace_edge"):
+                flags[name] = bool((self.engage and flags["right"].get(name)) or
+                                   (self.left_arm.engage and left_flags.get(name)))
         state = self.sim.step(self.left, self.right_cmd())
         if self.teleop.cfg.fruit_feedback and self.grip < 0.5:
             flags["between_jaws"] = self.object_between_jaws()
+            if self.left_arm:
+                flags["right"]["between_jaws"] = flags["between_jaws"]
+        if self.left_arm and self.left_arm.grip < 0.5:
+            flags["left"]["between_jaws"] = self.left_arm.object_between_jaws()
         images, pending = None, False
         if self.record_images and self.step_i % self.image_every == 0:
             worker = self._render_worker()
@@ -346,7 +434,7 @@ class TeleopRunner:
                     state=to14(state["right"], state["left"]),
                     action=to14(self.right_cmd(), self.left),
                     images=images, hand=hand, mode=self.teleop.mode,
-                    tcp=self.tcp(), flags=flags, events=events)
+                    tcp=self.tcp(), flags=flags, events=events, left_hand=left_hand)
         if pending:
             self._waiting.add(self.step_i)
         self._queue.append(tick)
