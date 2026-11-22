@@ -138,6 +138,19 @@ Referee: success = apple lifted >= 4 cm and held for 1 s with the gripper closed
 (60 s) or the apple drops off the table. A scripted pick through the same IK path succeeds 5/5 with
 a perfect aim, about 4/5 at 5 mm aim error and 3/5 at 10-20 mm: aim with precision mode.
 
+## Take-over (D)
+
+Dream-1 drives the arm; a fist held 0.5 s (or `h`) hands control to the human with no jump
+(the runner rebases on the measured joints), an open palm held still (or `g`) gives it back
+(`reset_episode()` + a refilled frame window). With `--record` every human segment >= 1.6 s
+is saved as its own episode: DAgger-style corrections exactly where the policy fails.
+
+```bash
+python -m dreamhands.takeover --mouse --dry-run                    # no network, scripted stand-in
+python -m dreamhands.takeover --model <checkpoint id>              # webcam, needs a Dream key
+python -m dreamhands.takeover --model <id> --record data/takeover  # keep the corrections
+```
+
 ## Team
 
 - A: hand tracker (webcam -> `HandState`)
