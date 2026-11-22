@@ -27,6 +27,7 @@ import numpy as np
 from dreamhands.runner import TeleopRunner
 from dreamhands.teleop import DISARMED
 from dreamhands.pose_assist import LevelHold
+from dreamhands import ui
 
 WIN = "DreamHands"
 WEBCAM_WIN = "DreamHands Webcam"
@@ -180,6 +181,8 @@ def main() -> int:
     ap.add_argument("--pose-assist", action="store_true",
                     help="press A and hold your forearm level to approach the apple")
     ap.add_argument("--record", metavar="DIR", help="save KEEP episodes as a LeRobot dataset in DIR")
+    ap.add_argument("--split", action="store_true",
+                    help="old layout: sim and webcam in two windows, no status bar")
     ap.add_argument("--task", default="pick up the apple", help="prompt stored with the episodes")
     ap.add_argument("--fixed", action="store_true", help="recording: keep the stock apple position")
     args = ap.parse_args()
@@ -201,8 +204,9 @@ def main() -> int:
         from dreamhands.a_tracker import ATracker, from_a
         from demo import draw as draw_tracking
         tracker = ATracker(args.camera, pose_model=POSE_MODEL if args.pose_assist else None)
-        cv2.namedWindow(WEBCAM_WIN)
-    referee = Referee(runner.sim) if args.trials or args.record else None
+        if args.split:
+            cv2.namedWindow(WEBCAM_WIN)
+    referee =Referee(runner.sim) if args.trials or args.record else None
     rec = None
     if args.record:
         from dreamhands.recorder import Recorder
@@ -347,12 +351,17 @@ def main() -> int:
             r = runner.sim.render(("top",))
             frame = r["top"] if r else None
         hint = control_hint(tick, runner, pose_hint, mouse=args.mouse)
-        cv2.imshow(WIN, draw_hud(frame, tick, runner, rec, hint))
+        hud = draw_hud(frame, tick, runner, rec, hint)
         if camera_frame is not None:
             draw_tracking(camera_frame, camera_hand, fps, keyboard_axes=args.keyboard_axes,
                           gesture_planes=args.gesture_planes, direct_hand=runner.teleop.cfg.direct_hand)
             draw_pose_cue(camera_frame, arm, hint)
-            cv2.imshow(WEBCAM_WIN, camera_frame)
+        if args.split:
+            cv2.imshow(WIN, hud)
+            if camera_frame is not None:
+                cv2.imshow(WEBCAM_WIN, camera_frame)
+        else:  # D's demo window: sim | webcam + status bar
+            cv2.imshow(WIN, ui.compose(hud, camera_frame, ui.status(tick, runner, rec, now)))
 
         nxt += DT
         delay = nxt - time.perf_counter()
